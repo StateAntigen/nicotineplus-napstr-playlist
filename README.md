@@ -85,6 +85,7 @@ reported in the log (and as a desktop notification). Once files are on disk:
 /napstr scan              # match entries against folders you already have
 /napstr hash all          # SHA-256 the local files -> NAPSTR file IDs
 /napstr status            # summary: entries, hashed count, published revisions
+/napstr orphans           # list files nothing points at any more
 /napstr publish           # sign and publish the kind 30425 event
 ```
 
@@ -119,6 +120,48 @@ so after a stalled batch use `/napstr reset all` (which keeps file IDs) followed
 by `/napstr auto missing`.
 
 Full command list: `/napstr help`.
+
+## When a source turns out to be dead
+
+Peers refuse downloads, and the two refusals people see most often mean
+different things:
+
+* **"Overwhelmed with requests" / "too many files"** is a busy peer, not a dead
+  one. Nicotine+ answers it by putting the download back in the queue, so it
+  waits its turn and eventually starts. Nothing is retried, because there is
+  nothing to retry - the source is fine, it is just busy.
+* **"File not shared from the uploader"** (and banned, logged off, connection
+  lost, disallowed extension) means that source is never going to serve this
+  file. Nicotine+ aborts the transfer, which the plugin listens for.
+
+When a source dies, the entry is not left sitting at `queued` forever. The
+failed source is recorded, the next best candidate above `auto_pick_threshold`
+is queued in its place, and this repeats up to three sources per entry. After
+that the entry is marked `failed` with the peer's own wording in its notes and
+the log tells you to use `/napstr options <n>`. Only candidates you would have
+auto-picked are used: if the runner-up is a 0.42 wrong-mix, the plugin stops and
+asks rather than downloading it.
+
+A **cancel is your decision**, so it is never retried behind your back - the
+entry is marked `failed` and points at `/napstr options <n>`. A failed source is
+not offered again for that entry (it is kept in the entry's `tried` list, which
+`/napstr reset` clears), and the periodic sweep catches the rare failure that
+arrives without a transfer status at all.
+
+Stray files left behind by all this are listed by `/napstr orphans`: files in
+the playlist's own staging folder that no entry points at any more, including
+duplicates such as `Name (1).mp3` and Nicotine+'s `.~`/`.part` leftovers.
+
+```
+/napstr orphans           # list them; nothing is deleted
+/napstr orphans delete    # remove them
+```
+
+Files written in the last two minutes are always kept, so a download that has
+just finished is never deleted before it is linked. The command refuses to run
+at all if you set your own `download_folder`, because the files there are yours
+to manage - the per-playlist staging folder is the only place this is
+unambiguous.
 
 ## Search pace and server bans
 
@@ -243,6 +286,12 @@ it is reported separately:
 python tools/reset_playlist.py --orphans          # list what nothing points at
 python tools/reset_playlist.py --orphans --yes    # delete it
 ```
+
+The same check is available inside Nicotine+ as `/napstr orphans`, in front of
+the playlist the plugin has loaded (and `/napstr orphans delete` removes them).
+Both use one implementation, so they can never disagree about what is stray.
+Both also leave files written in the last couple of minutes alone: a download
+that just finished may not be linked to its entry yet.
 
 Files in the staging folder are also matched by content, not by name, so a peer
 that shares a file with an odd name (leading `.~`, for example - that is the

@@ -25,6 +25,7 @@ __all__ = [
     "expand_extensions",
     "find_local_matches",
     "find_ranked_candidates",
+    "human_size",
     "megabytes_to_bytes",
     "normalize_text",
     "score_candidate",
@@ -400,11 +401,11 @@ def score_candidate(entry, path, size=None, attributes=None, options=None):
 
         if options.min_size_bytes and size < options.min_size_bytes:
             return 0.0, [
-                f"{_human_size(size)} below the minimum of {_human_size(options.min_size_bytes)}"]
+                f"{human_size(size)} below the minimum of {human_size(options.min_size_bytes)}"]
 
         if options.max_size_bytes and size > options.max_size_bytes:
             return 0.0, [
-                f"{_human_size(size)} above the maximum of {_human_size(options.max_size_bytes)}"]
+                f"{human_size(size)} above the maximum of {human_size(options.max_size_bytes)}"]
 
     candidate_text = _path_to_text(path)
     candidate_tokens = candidate_text.split()
@@ -523,7 +524,7 @@ def describe_candidate(candidate):
         details.append(f"{minutes}:{seconds:02d}")
 
     if candidate.get("size"):
-        details.append(_human_size(candidate["size"]))
+        details.append(human_size(candidate["size"]))
 
     if details:
         parts.append("(" + ", ".join(details) + ")")
@@ -531,7 +532,7 @@ def describe_candidate(candidate):
     return " ".join(parts)
 
 
-def _human_size(num_bytes):
+def human_size(num_bytes):
 
     try:
         size = float(num_bytes)

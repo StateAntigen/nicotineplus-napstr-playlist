@@ -684,6 +684,267 @@ class DownloadTest(PluginTestCase):
         self.assertEqual(playlist.entries[0]["file_id"], hashlib.sha256(content).hexdigest())
 
 
+class DownloadFailureTest(PluginTestCase):
+    """A refused or dead download moves on to the next source by itself.
+
+    A real session lost good files to peers that answered "File not shared" and
+    then sat at "queued" forever, so the two things tested here are that a dead
+    source is replaced and that a live one is never touched.
+    """
+
+    def setUp(self):
+
+        super().setUp()
+
+        self.playlist = self.load_playlist()
+        self.entry = self.playlist.entries[0]
+        self.entry["candidates"] = [
+            {"username": "dead1", "path": "Music\\Metallica\\Enter Sandman.mp3",
+             "size": 1000, "bitrate": 320, "length": 331, "score": 0.95},
+            {"username": "dead2", "path": "Music\\Metallica\\Enter Sandman.mp3",
+             "size": 1000, "bitrate": 320, "length": 331, "score": 0.93},
+            {"username": "alive", "path": "Music\\Metallica\\Enter Sandman.mp3",
+             "size": 1000, "bitrate": 320, "length": 331, "score": 0.91}
+        ]
+
+    def fail_current(self, status="File not shared."):
+        """Abort the currently chosen transfer the way Nicotine+ would."""
+
+        chosen = self.entry["chosen"]
+        transfer = self.core.downloads.fail(chosen["username"], chosen["path"], status)
+        SCHEDULER.emit("abort-download", transfer, status, True)
+
+        return transfer
+
+    def test_abort_download_is_subscribed(self):
+
+        # events.connect raises ValueError for a name Nicotine+ does not have,
+        # so this also proves the event really exists in 3.3.10.
+        self.assertTrue(SCHEDULER.callbacks.get("abort-download"))
+
+    def test_a_dead_source_is_replaced_automatically(self):
+
+        self.run_command("pick 1 1")
+        self.assertEqual(self.core.downloads.enqueued[0]["username"], "dead1")
+
+        self.fail_current()
+
+        self.assertEqual(len(self.core.downloads.enqueued), 2)
+        self.assertEqual(self.core.downloads.enqueued[1]["username"], "dead2")
+        self.assertEqual(self.entry["chosen"]["username"], "dead2")
+        self.assertEqual(self.entry["status"], "queued")
+        self.assertEqual(self.entry["tried"], [{
+            "username": "dead1", "path": "Music\\Metallica\\Enter Sandman.mp3",
+            "reason": "File not shared."
+        }])
+
+    def test_a_dead_source_is_never_chosen_twice(self):
+
+        self.run_command("pick 1 1")
+        self.fail_current()
+        self.fail_current()
+        self.fail_current()
+
+        usernames = [item["username"] for item in self.core.downloads.enqueued]
+        self.assertEqual(usernames, ["dead1", "dead2", "alive"])
+
+    def test_the_hunt_stops_after_three_sources(self):
+
+        self.entry["candidates"].append(
+            {"username": "also-alive", "path": "Music\\Metallica\\Enter Sandman.mp3",
+             "size": 1000, "bitrate": 320, "length": 331, "score": 0.90})
+
+        self.run_command("pick 1 1")
+
+        for _attempt in range(3):
+            self.fail_current()
+
+        # Three failures is the cap: the fourth candidate is left for the user
+        self.assertEqual(len(self.core.downloads.enqueued), 3)
+        self.assertEqual(self.entry["status"], "failed")
+        self.assertIn("/napstr options 1", self.entry["notes"])
+        self.assertIn("/napstr options 1", "\n".join(self.plugin.log_lines))
+
+    def test_a_cancelled_download_is_not_retried(self):
+
+        self.run_command("pick 1 1")
+        self.fail_current("Cancelled")
+
+        self.assertEqual(len(self.core.downloads.enqueued), 1)
+        self.assertEqual(self.entry["status"], "failed")
+        self.assertIn("cancelled", self.entry["notes"])
+
+    def test_a_candidate_below_the_threshold_is_left_for_the_user(self):
+
+        self.entry["candidates"] = [
+            {"username": "dead1", "path": "Music\\Metallica\\Enter Sandman.mp3",
+             "size": 1000, "bitrate": 320, "length": 331, "score": 0.95},
+            {"username": "wrong-mix", "path": "Music\\Metallica\\Enter Sandman (live).mp3",
+             "size": 1000, "bitrate": 320, "length": 331, "score": 0.42}
+        ]
+
+        self.run_command("pick 1 1")
+        self.fail_current()
+
+        self.assertEqual(len(self.core.downloads.enqueued), 1)
+        self.assertEqual(self.entry["status"], "failed")
+
+    def test_an_entry_that_already_has_a_file_ignores_a_late_abort(self):
+
+        self.run_command("pick 1 1")
+        self.entry["file_id"] = "a" * 64
+        self.fail_current()
+
+        self.assertEqual(len(self.core.downloads.enqueued), 1)
+        self.assertEqual(self.entry["chosen"]["username"], "dead1")
+
+    def test_a_transfer_that_is_not_ours_is_ignored(self):
+
+        self.run_command("pick 1 1")
+        SCHEDULER.emit("abort-download", fake_nicotine.FakeTransfer("stranger", "Other.mp3"),
+                       "File not shared.", True)
+
+        self.assertEqual(len(self.core.downloads.enqueued), 1)
+        self.assertEqual(self.entry["status"], "queued")
+
+    def test_an_abort_for_a_transfer_we_do_not_own_is_ignored(self):
+
+        self.run_command("pick 1 1")
+
+        # Same user and path as our queued download, but a different object -
+        # an upload aborting, say. Nicotine+ emits this event for uploads too.
+        impostor = fake_nicotine.FakeTransfer("dead1", "Music\\Metallica\\Enter Sandman.mp3")
+        SCHEDULER.emit("abort-download", impostor, "File not shared.", True)
+
+        self.assertEqual(len(self.core.downloads.enqueued), 1)
+        self.assertEqual(self.entry["status"], "queued")
+
+    def test_a_vanished_transfer_is_caught_by_the_sweep(self):
+
+        self.run_command("pick 1 1")
+        self.core.downloads.forget("dead1", "Music\\Metallica\\Enter Sandman.mp3")
+
+        self.plugin._sweep_queued_downloads()
+
+        self.assertEqual(len(self.core.downloads.enqueued), 2)
+        self.assertEqual(self.entry["chosen"]["username"], "dead2")
+
+    def test_the_sweep_leaves_a_live_transfer_alone(self):
+
+        self.run_command("pick 1 1")
+
+        self.plugin._sweep_queued_downloads()
+
+        self.assertEqual(len(self.core.downloads.enqueued), 1)
+        self.assertEqual(self.entry["status"], "queued")
+
+    def test_disable_cancels_the_sweep(self):
+
+        timer_id = self.plugin._download_sweep_timer
+
+        self.assertIsNotNone(timer_id)
+
+        self.plugin.disable()
+
+        self.assertIn(timer_id, SCHEDULER.cancelled)
+        self.assertIsNone(self.plugin._download_sweep_timer)
+
+
+class OrphansTest(PluginTestCase):
+    """Stray files in a playlist's own staging folder, and nothing else."""
+
+    def setUp(self):
+
+        super().setUp()
+
+        self.playlist = self.load_playlist()
+        self.folder = self.playlist.paths_for_download()
+        os.makedirs(self.folder, exist_ok=True)
+
+        self.kept = self.write_staged("Enter Sandman.mp3", age=600)
+        self.orphan = self.write_staged("Rooster (1).mp3", age=600)
+        self.partial = self.write_staged(".~Rooster.mp3", age=600)
+        self.fresh = self.write_staged("Would.mp3", age=0)
+
+        # The kept file is the one an entry points at
+        self.playlist.entries[0]["local_path"] = self.kept
+
+    def write_staged(self, name, age):
+        """A file in the staging folder, written ``age`` seconds ago."""
+
+        path = os.path.join(self.folder, name)
+
+        with open(path, "wb") as file_handle:
+            file_handle.write(b"x" * 2048)
+
+        when = time.time() - age
+        os.utime(path, (when, when))
+
+        return path
+
+    def test_lists_stray_files_and_deletes_nothing(self):
+
+        output = self.run_command("orphans")
+
+        self.assertIn("Rooster (1).mp3", output)
+        self.assertIn(".~Rooster.mp3", output)
+        self.assertNotIn("Enter Sandman.mp3", output)
+        self.assertIn("Nothing was deleted", output)
+
+        self.assertTrue(os.path.isfile(self.orphan))
+        self.assertTrue(os.path.isfile(self.partial))
+
+    def test_delete_removes_stray_files_and_keeps_the_rest(self):
+
+        output = self.run_command("orphans delete")
+
+        self.assertIn("Deleted 2 file(s)", output)
+        self.assertFalse(os.path.exists(self.orphan))
+        self.assertFalse(os.path.exists(self.partial))
+        self.assertTrue(os.path.isfile(self.kept))
+
+    def test_a_file_written_a_moment_ago_is_never_deleted(self):
+
+        output = self.run_command("orphans delete")
+
+        self.assertIn("Would.mp3  skipped, written less than a minute ago", output)
+        self.assertIn("Deleted 2 file(s)", output)
+        self.assertTrue(os.path.isfile(self.fresh))
+
+    def test_a_lone_fresh_file_is_reported_but_kept(self):
+
+        os.remove(self.orphan)
+        os.remove(self.partial)
+
+        output = self.run_command("orphans delete")
+
+        self.assertIn("No stray files", output)
+        self.assertIn("left alone for now", output)
+        self.assertTrue(os.path.isfile(self.fresh))
+
+    def test_a_chosen_download_folder_is_refused(self):
+
+        self.plugin.settings["download_folder"] = self.folder
+
+        output = self.run_command("orphans delete")
+
+        self.assertIn("Refusing", output)
+        self.assertTrue(os.path.isfile(self.orphan))
+
+    def test_a_clean_folder_says_so(self):
+
+        self.run_command("orphans delete")
+        os.remove(self.fresh)
+
+        self.assertIn("No stray files", self.run_command("orphans"))
+
+    def test_orphans_needs_a_playlist(self):
+
+        self.plugin.playlist = None
+
+        self.assertIn("No playlist loaded", self.run_command("orphans"))
+
+
 class PublishTest(PluginTestCase):
 
     def setUp(self):

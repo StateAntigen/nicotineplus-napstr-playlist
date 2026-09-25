@@ -121,54 +121,16 @@ def backup_file(path, suffix=".bak"):
     return target
 
 
-def find_orphans(playlist, folder):
-    """Split the staging folder into files no entry points at.
-
-    Unlinking an entry (here or with /napstr forget) leaves its file behind. An
-    orphan is dead weight: nothing will hash it, publish it, or replace it, and
-    a later download of the same track writes a second copy next to it.
-
-    Returns ``(orphans, partials)``, the second being Nicotine+'s own ``.~``
-    partial downloads, which are worth naming separately.
-    """
-
-    referenced = set()
-
-    for entry in playlist.entries:
-        local_path = str(entry.get("local_path") or "")
-
-        if local_path:
-            referenced.add(os.path.normcase(os.path.abspath(local_path)))
-
-    orphans = []
-    partials = []
-
-    if not os.path.isdir(folder):
-        return orphans, partials
-
-    for name in sorted(os.listdir(folder)):
-        path = os.path.join(folder, name)
-
-        if not os.path.isfile(path):
-            continue
-
-        if os.path.normcase(os.path.abspath(path)) in referenced:
-            continue
-
-        if name.startswith(".~") or name.endswith(".part"):
-            partials.append(path)
-
-        else:
-            orphans.append(path)
-
-    return orphans, partials
-
-
 def handle_orphans(args, playlist, playlist_id):
     """Report, and optionally delete, the files nothing points at any more."""
 
     folder = napstr_state.staging_folder_path(args.data_folder, playlist_id)
-    orphans, partials = find_orphans(playlist, folder)
+
+    # The same grace period the plugin command uses: a download that has just
+    # finished may not be linked to its entry yet, and deleting that would
+    # destroy a file the playlist is about to claim.
+    orphans, partials, skipped = napstr_state.find_orphans(
+        playlist, folder, minimum_age_seconds=napstr_state.ORPHAN_MINIMUM_AGE_SECONDS)
 
     print(f"Staging  : {folder}")
     print()
@@ -176,7 +138,7 @@ def handle_orphans(args, playlist, playlist_id):
 
     for path in orphans:
         try:
-            size = napstr_match._human_size(os.path.getsize(path))  # pylint: disable=protected-access
+            size = napstr_match.human_size(os.path.getsize(path))
 
         except OSError:
             size = "?"
@@ -185,6 +147,9 @@ def handle_orphans(args, playlist, playlist_id):
 
     for path in partials:
         print(f"  {'partial':>10}  {os.path.basename(path)}  (incomplete download)")
+
+    for path in skipped:
+        print(f"  {'recent':>10}  {os.path.basename(path)}  (written moments ago, kept)")
 
     if not orphans and not partials:
         return 0
@@ -267,12 +232,12 @@ def evaluate_entry(entry, options):
             return False, f"unsupported format: {extension or 'unknown'}"
 
     if options.min_size_bytes and size < options.min_size_bytes:
-        return False, (f"{napstr_match._human_size(size)} below the minimum of "  # pylint: disable=protected-access
-                       f"{napstr_match._human_size(options.min_size_bytes)}")  # pylint: disable=protected-access
+        return False, (f"{napstr_match.human_size(size)} below the minimum of "
+                       f"{napstr_match.human_size(options.min_size_bytes)}")
 
     if options.max_size_bytes and size > options.max_size_bytes:
-        return False, (f"{napstr_match._human_size(size)} above the maximum of "  # pylint: disable=protected-access
-                       f"{napstr_match._human_size(options.max_size_bytes)}")  # pylint: disable=protected-access
+        return False, (f"{napstr_match.human_size(size)} above the maximum of "
+                       f"{napstr_match.human_size(options.max_size_bytes)}")
 
     kbps = implied_bitrate(local_path, entry, size)
 
@@ -291,7 +256,7 @@ def evaluate_entry(entry, options):
     else:
         detail = "kept"
 
-    return True, f"{detail} ({napstr_match._human_size(size)})"  # pylint: disable=protected-access
+    return True, f"{detail} ({napstr_match.human_size(size)})"
 
 
 def main():
@@ -416,21 +381,14 @@ def main():
         if had_file and not keep:
             unlinked.append((entry.get("position"), entry.get("title", ""),
                              str(entry.get("local_path") or ""), detail))
-            entry["file_id"] = ""
-            entry["local_path"] = ""
-            entry["hashed_at"] = None
 
         if entry.get("candidates") or entry.get("chosen") or entry.get("status") != napstr_state.STATUS_NEW:
             cleared += 1
 
-        entry["candidates"] = []
-        entry["chosen"] = None
-        entry["score"] = None
-        entry["search_token"] = None
-        entry["query"] = ""
-        entry["notes"] = ""
-        entry["status"] = napstr_state.STATUS_NEW
-
+        # The plugin's own reset, so a field it clears (the dead-source list is
+        # newer than this tool) cannot be left behind by a copy kept in here.
+        napstr_state.reset_entries(
+            playlist, positions=[entry["position"]], drop_files=not keep)
     print(f"Decisions cleared for {cleared} of {len(playlist.entries)} entries.")
     print(f"File IDs dropped for {len(unlinked)} entries.")
 

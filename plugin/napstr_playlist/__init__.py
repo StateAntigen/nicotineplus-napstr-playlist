@@ -58,6 +58,28 @@ INACTIVE_STATUSES = (
     napstr_state.STATUS_DOWNLOADING, napstr_state.STATUS_QUEUED
 )
 
+# Transfer statuses that mean this download is not going to happen. Verified
+# against Nicotine+ 3.3.10 (transfers.py TransferStatus, slskmessages.py
+# TransferRejectReason). A peer that is merely busy answers "Too many files"
+# or "Too many megabytes", and Nicotine+ turns those into Queued, so a busy
+# peer never lands here - it waits, which is what it should do.
+FATAL_TRANSFER_STATUSES = (
+    "File not shared.", "Banned", "Disallowed extension", "File read error.",
+    "User logged off", "Connection closed", "Connection timeout",
+    "Download folder error", "Local file error", "Filtered"
+)
+
+# A cancel is the user's decision, not a dead source. Retrying behind their
+# back would fight them, so it is reported instead.
+CANCELLED_TRANSFER_STATUS = "Cancelled"
+
+# How many different sources to try for one entry before asking the user.
+MAX_DOWNLOAD_ATTEMPTS = 3
+
+# How often the queued-download sweep runs. It is a net for failures that
+# arrive without an abort-download event, so it is deliberately slow.
+DOWNLOAD_SWEEP_SECONDS = 300
+
 
 class Plugin(BasePlugin):
     """NAPSTR playlist importer, matcher, hasher and publisher."""
@@ -240,6 +262,7 @@ class Plugin(BasePlugin):
         self._search_api_name = None         # which Nicotine+ search API was detected
         self._pacer = napstr_pace.SearchPacer()  # one search at a time, never in bursts
         self._configured_interval = None     # the setting the pacer was built from
+        self._download_sweep_timer = None    # net for silent download failures
         self._auto_positions = set()         # positions that should auto-pick
         self._hash_cancellations = {}        # position -> threading.Event
         self._publishing = False
@@ -253,7 +276,9 @@ class Plugin(BasePlugin):
 
         events.connect("file-search-response", self.on_file_search_response)
         events.connect("log-message", self.on_log_message)
+        events.connect("abort-download", self.on_abort_download)
         self._configure_pacer()
+        self._schedule_download_sweep()
         self.log("Loaded. Type /napstr help for the command list.")
 
         playlist_id = str(self.settings.get("playlist_id") or "").strip()
@@ -290,6 +315,10 @@ class Plugin(BasePlugin):
         if self._search_queue_timer is not None:
             events.cancel_scheduled(self._search_queue_timer)
             self._search_queue_timer = None
+
+        if self._download_sweep_timer is not None:
+            events.cancel_scheduled(self._download_sweep_timer)
+            self._download_sweep_timer = None
 
         if self.playlist is not None:
             self.playlist.save()
@@ -472,6 +501,7 @@ class Plugin(BasePlugin):
             "unskip": self._action_unskip,
             "setpath": self._action_setpath,
             "scan": self._action_scan,
+            "orphans": self._action_orphans,
             "hash": self._action_hash,
             "status": self._action_status,
             "title": self._action_title,
@@ -513,6 +543,7 @@ class Plugin(BasePlugin):
             "\t/napstr skip <n> | unskip <n>               mark an entry\n"
             "\t/napstr setpath <n> <file>                  set the local file by hand\n"
             "\t/napstr scan                                find files you already have\n"
+            "\t/napstr orphans [delete]                    list (or delete) stray files\n"
             "\t/napstr hash <n|all>                        SHA-256 the local files\n"
             "\t/napstr reset <n|all|missing>               clear decisions, keep file IDs\n"
             "\t/napstr forget <n|all|missing>              clear decisions and file IDs\n"
@@ -1587,6 +1618,157 @@ class Plugin(BasePlugin):
 
         return None
 
+    def on_abort_download(self, transfer, status=None, _update_parent=True):
+        """Nicotine+ gave up on a transfer; try another source for that entry.
+
+        Fired for every aborted transfer in the client - uploads included - so
+        the transfer is checked against the download manager first, then
+        matched back to an entry. Entries that already hold a hashed file are
+        left alone.
+        """
+
+        if self._shutting_down or self.playlist is None or transfer is None:
+            return
+
+        transfers = getattr(getattr(self.core, "downloads", None), "transfers", None)
+
+        if transfers is not None:
+            key = f"{getattr(transfer, 'username', '')}{getattr(transfer, 'virtual_path', '')}"
+
+            # Identity, not equality: only the very transfer the download
+            # manager queued for us belongs here. A peer uploading to us under
+            # the same name and path is a different object, and an upload
+            # aborting is not a reason to re-download anything.
+            if transfers.get(key) is not transfer:
+                return
+
+        entry = self._entry_for_transfer(
+            getattr(transfer, "username", ""), getattr(transfer, "virtual_path", ""))
+
+        if entry is None or entry.get("file_id"):
+            return
+
+        self._handle_download_failure(entry, str(status or ""))
+
+    def _handle_download_failure(self, entry, status):
+        """Record a dead source and move to the next candidate when allowed."""
+
+        position = entry["position"]
+        reason = status or "no reason given"
+        tried = entry.setdefault("tried", [])
+        chosen = entry.get("chosen") or {}
+
+        if chosen:
+            tried.append({
+                "username": chosen.get("username", ""),
+                "path": chosen.get("path", ""),
+                "reason": reason
+            })
+
+        entry["chosen"] = None
+
+        if status == CANCELLED_TRANSFER_STATUS:
+            self.playlist.set_status(
+                entry, napstr_state.STATUS_FAILED,
+                "download cancelled; /napstr options %d to pick another" % position)
+            self._report(
+                f"Entry {position}: download cancelled. "
+                f"Use /napstr options {position} to pick another candidate.")
+            self.playlist.save()
+            return
+
+        replacement = self._next_untried_candidate(entry)
+
+        # A dead peer is worth exactly one more source, not an endless hunt.
+        if replacement is not None and len(tried) < MAX_DOWNLOAD_ATTEMPTS:
+            self._report(
+                f"Entry {position}: source failed ({reason}), trying the next one.", notify=True)
+            self._download_candidate(entry, replacement, automatic=True)
+            self.playlist.save()
+            return
+
+        self.playlist.set_status(
+            entry, napstr_state.STATUS_FAILED,
+            f"every source failed ({reason}); /napstr options {position} to choose")
+        self._report(
+            f"Entry {position}: {len(tried)} source(s) failed, the last one said "
+            f"\"{reason}\". Use /napstr options {position} to pick another, "
+            f"or /napstr search {position} to look again.", notify=True)
+        self.playlist.save()
+
+    def _next_untried_candidate(self, entry):
+        """The best candidate left that is good enough and has not been tried."""
+
+        tried = {
+            (item.get("username"), item.get("path"))
+            for item in entry.get("tried") or []
+        }
+        threshold = float(self.settings.get("auto_pick_threshold", 0.8))
+
+        # Candidates are stored best first, so the first acceptable one is it.
+        for candidate in entry.get("candidates") or []:
+            score = candidate.get("score") or 0
+
+            if score < threshold:
+                continue
+
+            if (candidate.get("username"), candidate.get("path")) in tried:
+                continue
+
+            return candidate
+
+        return None
+
+    def _schedule_download_sweep(self):
+
+        if self._shutting_down:
+            return
+
+        self._download_sweep_timer = events.schedule(
+            delay=DOWNLOAD_SWEEP_SECONDS, callback=self._sweep_queued_downloads)
+
+    def _sweep_queued_downloads(self):
+        """Catch downloads that died without an abort-download event.
+
+        Nicotine+ only aborts with a status when it has one to report, so an
+        entry can sit at "queued" forever with nothing left in transfers.
+        """
+
+        self._download_sweep_timer = None
+
+        if self._shutting_down or self.playlist is None:
+            return
+
+        pending = [
+            entry for entry in self.playlist.entries
+            if entry.get("status") == napstr_state.STATUS_QUEUED and not entry.get("file_id")
+        ]
+
+        if not pending:
+            self._schedule_download_sweep()
+            return
+
+        transfers = getattr(getattr(self.core, "downloads", None), "transfers", None) or {}
+
+        for entry in pending:
+
+            if entry.get("status") != napstr_state.STATUS_QUEUED:
+                continue  # a retry above already moved on
+
+            chosen = entry.get("chosen") or {}
+            transfer = transfers.get(f"{chosen.get('username', '')}{chosen.get('path', '')}")
+
+            if transfer is None:
+                self._handle_download_failure(entry, "the download disappeared")
+                continue
+
+            status = str(getattr(transfer, "status", "") or "")
+
+            if status in FATAL_TRANSFER_STATUSES:
+                self._handle_download_failure(entry, status)
+
+        self._schedule_download_sweep()
+
     # ------------------------------------------------------------------
     # skipping and manual paths
     # ------------------------------------------------------------------
@@ -1781,6 +1963,89 @@ class Plugin(BasePlugin):
             target=self._scan_worker, args=(folders, unresolved),
             name="napstr-scan", daemon=True)
         thread.start()
+
+        return True
+
+    def _action_orphans(self, rest):
+        """List, and only on the literal word 'delete' remove, stray files.
+
+        A file only counts as stray inside this playlist's own staging folder.
+        If the user set a download folder themselves, the files there are their
+        business, so the command refuses instead of guessing.
+        """
+
+        if not self._require_playlist():
+            return False
+
+        if str(self.settings.get("download_folder") or "").strip():
+            self.output(
+                "Refusing: 'Download folder' is set in the plugin settings, so finished files "
+                "land in a folder you chose rather than this playlist's own staging folder. "
+                "Delete stray files there yourself, or clear that setting and let the plugin "
+                "keep its files in one folder per playlist.")
+            return False
+
+        folder = self.playlist.paths_for_download()
+
+        if not os.path.isdir(folder):
+            self.output(f"Nothing to clean: {folder} does not exist yet.")
+            return True
+
+        orphans, partials, skipped = napstr_state.find_orphans(
+            self.playlist, folder,
+            minimum_age_seconds=napstr_state.ORPHAN_MINIMUM_AGE_SECONDS)
+
+        delete = rest.strip().lower() == "delete"
+
+        if not orphans and not partials:
+            self.output(f"No stray files in {folder}.")
+
+            if skipped:
+                self.output(
+                    f"{len(skipped)} file(s) were written less than a minute ago, so they are "
+                    "left alone for now.")
+
+            return True
+
+        total = sum(os.path.getsize(path) for path in orphans + partials if os.path.isfile(path))
+        self.output(
+            f"Stray files in {folder} "
+            f"({len(orphans) + len(partials)}, {napstr_match.human_size(total)}):")
+
+        for path in orphans:
+            self.output(
+                f"\t{os.path.basename(path)}  {napstr_match.human_size(os.path.getsize(path))}")
+
+        for path in partials:
+            self.output(
+                f"\t{os.path.basename(path)}  {napstr_match.human_size(os.path.getsize(path))}"
+                "  (incomplete)")
+
+        for path in skipped:
+            self.output(f"\t{os.path.basename(path)}  skipped, written less than a minute ago")
+
+        if not delete:
+            self.output(
+                "Nothing was deleted. Run /napstr orphans delete to remove the files above "
+                "(files younger than a minute are always kept).")
+            return True
+
+        removed = 0
+        freed = 0
+
+        for path in orphans + partials:
+            try:
+                size = os.path.getsize(path)
+                os.remove(path)
+
+            except OSError as error:
+                self.output(f"Could not delete {os.path.basename(path)}: {error}")
+                continue
+
+            removed += 1
+            freed += size
+
+        self.output(f"Deleted {removed} file(s), freed {napstr_match.human_size(freed)}.")
 
         return True
 

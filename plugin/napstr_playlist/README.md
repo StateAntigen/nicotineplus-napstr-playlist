@@ -13,6 +13,7 @@ result as a NAPSTR playlist event (Nostr kind `30425`).
 /napstr scan            # match files you already have
 /napstr hash all        # SHA-256 -> NAPSTR file IDs
 /napstr reset 12        # forget the search results for entry 12
+/napstr orphans         # list stray files (add 'delete' to remove them)
 /napstr publish         # sign and publish the event
 ```
 
@@ -32,6 +33,18 @@ ID too, which is also what lets `/napstr auto` fetch a replacement (an entry
 that already has a hashed file is left alone, so that a track is never
 downloaded twice). Note that `reset missing` skips queued and downloading
 entries, so after a stalled batch use `reset all` followed by `auto missing`.
+
+**A dead source is replaced automatically.** When a peer refuses a download
+(`File not shared.`, banned, logged off, connection lost) the plugin records
+that source as tried and queues the next best candidate above your
+`auto_pick_threshold`, up to three sources per entry, then marks the entry
+`failed` with the reason and points at `/napstr options <n>`. A cancel is yours
+to make, so it is never retried. A peer that is merely busy answers "too many
+files" - Nicotine+ queues that as normal and the download simply waits, so
+nothing is retried for it. Files nothing points at any more (an unlinked entry,
+a duplicate `Name (1).mp3`, an interrupted download) are listed by `/napstr
+orphans`, which only ever looks in the playlist's own staging folder and only
+deletes with the literal word `delete`.
 
 **Searching is paced on purpose.** One search is in flight at a time, 60 seconds
 apart by default and never faster than 45 seconds, because the Soulseek server

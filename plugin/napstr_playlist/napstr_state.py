@@ -18,10 +18,12 @@ import uuid
 
 __all__ = [
     "HASH_CHUNK_SIZE",
+    "ORPHAN_MINIMUM_AGE_SECONDS",
     "PLUGIN_FOLDER_NAME",
     "STATUSES",
     "PlaylistState",
     "delete_playlist",
+    "find_orphans",
     "list_playlists",
     "load_playlist",
     "new_playlist_id",
@@ -53,6 +55,11 @@ STATUSES = (
 
 # Statuses that need no further action
 FINAL_STATUSES = (STATUS_HASHED, STATUS_SKIPPED)
+
+# How recently a staging file may have been written and still be reported as an
+# orphan. A download that has just finished may not be linked to its entry yet,
+# so both the plugin command and the command line tool wait this long.
+ORPHAN_MINIMUM_AGE_SECONDS = 120
 
 
 def new_playlist_id():
@@ -366,6 +373,69 @@ def _write_json(file_path, data):
         raise
 
 
+def find_orphans(playlist, folder, minimum_age_seconds=0, now=None):
+    """Split a staging folder into files no entry points at any more.
+
+    Unlinking an entry leaves its file behind, and a download that was never
+    linked does the same. Such a file is dead weight: nothing hashes it,
+    publishes it or replaces it, and a later download of the same track writes
+    a second copy beside it.
+
+    Only ever call this on a playlist's own staging folder. Pointed at a music
+    library it would report every song there, which is why the caller decides
+    the folder and why a folder the user chose is refused.
+
+    Returns ``(orphans, partials, skipped)``. ``partials`` are Nicotine+'s own
+    incomplete names, ``skipped`` are files too recently written to judge - a
+    download may be mid-move, or finished but not yet linked.
+    """
+
+    referenced = set()
+
+    for entry in playlist.entries:
+        local_path = str(entry.get("local_path") or "")
+
+        if local_path:
+            referenced.add(os.path.normcase(os.path.abspath(local_path)))
+
+    orphans = []
+    partials = []
+    skipped = []
+
+    if not os.path.isdir(folder):
+        return orphans, partials, skipped
+
+    reference_time = time.time() if now is None else now
+
+    for name in sorted(os.listdir(folder)):
+        path = os.path.join(folder, name)
+
+        if not os.path.isfile(path):
+            continue
+
+        if os.path.normcase(os.path.abspath(path)) in referenced:
+            continue
+
+        if minimum_age_seconds > 0:
+            try:
+                age = reference_time - os.path.getmtime(path)
+
+            except OSError:
+                age = 0
+
+            if age < minimum_age_seconds:
+                skipped.append(path)
+                continue
+
+        if name.startswith(".~") or name.endswith(".part"):
+            partials.append(path)
+
+        else:
+            orphans.append(path)
+
+    return orphans, partials, skipped
+
+
 def reset_entries(playlist, positions=None, drop_files=False):
     """Clear what was *decided* about entries, keeping what is *known*.
 
@@ -387,6 +457,7 @@ def reset_entries(playlist, positions=None, drop_files=False):
         entry["search_token"] = None
         entry["query"] = ""
         entry["notes"] = ""
+        entry["tried"] = []
 
         if drop_files:
             entry["file_id"] = ""

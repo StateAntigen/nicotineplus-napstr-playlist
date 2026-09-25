@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -338,6 +339,7 @@ class ResetEntriesTest(unittest.TestCase):
             entry["score"] = 0.9
             entry["query"] = "query"
             entry["notes"] = "note"
+            entry["tried"] = [{"username": "u", "path": "p", "reason": "File not shared."}]
             entry["status"] = napstr_state.STATUS_HASHED
 
     def test_reset_keeps_file_ids_by_default(self):
@@ -354,6 +356,9 @@ class ResetEntriesTest(unittest.TestCase):
             self.assertIsNone(entry["score"])
             self.assertEqual(entry["query"], "")
             self.assertEqual(entry["notes"], "")
+            # Dead sources are decisions too: a reset must not forget them, or
+            # auto would hand the same refused peer straight back.
+            self.assertEqual(entry["tried"], [])
             self.assertTrue(entry["file_id"])
             self.assertTrue(entry["local_path"])
 
@@ -390,6 +395,93 @@ class ResetEntriesTest(unittest.TestCase):
             self.assertEqual(entry["status"], napstr_state.STATUS_HASHED)
             self.assertEqual(len(entry["candidates"]), 1)
             self.assertTrue(entry["file_id"])
+
+
+class FindOrphansTest(unittest.TestCase):
+    """find_orphans, which is only ever pointed at one playlist's folder."""
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp()
+        self.staging = os.path.join(self.folder, "files")
+        os.makedirs(self.staging)
+
+        self.playlist = napstr_state.PlaylistState(
+            self.folder, title="Rock", entries=ENTRIES, tags=["rock"])
+
+    def write(self, name, age=600):
+        """A file in the staging folder, written ``age`` seconds ago."""
+
+        path = os.path.join(self.staging, name)
+
+        with open(path, "wb") as file_handle:
+            file_handle.write(b"x" * 10)
+
+        when = time.time() - age
+        os.utime(path, (when, when))
+
+        return path
+
+    @staticmethod
+    def names(paths):
+        return sorted(os.path.basename(path) for path in paths)
+
+    def test_a_linked_file_is_not_an_orphan(self):
+
+        kept = self.write("kept.mp3")
+        self.write("stray.mp3")
+        self.playlist.entries[0]["local_path"] = kept
+
+        orphans, partials, skipped = napstr_state.find_orphans(self.playlist, self.staging)
+
+        self.assertEqual(self.names(orphans), ["stray.mp3"])
+        self.assertEqual(partials, [])
+        self.assertEqual(skipped, [])
+
+    def test_incomplete_names_are_separated_out(self):
+
+        self.write(".~Rooster.mp3")
+        self.write("Would.mp3.part")
+        self.write("Rooster.mp3")
+
+        orphans, partials, _skipped = napstr_state.find_orphans(self.playlist, self.staging)
+
+        self.assertEqual(self.names(orphans), ["Rooster.mp3"])
+        self.assertEqual(self.names(partials), [".~Rooster.mp3", "Would.mp3.part"])
+
+    def test_a_file_written_a_moment_ago_is_skipped(self):
+
+        self.write("fresh.mp3", age=0)
+        self.write("old.mp3", age=600)
+
+        orphans, _partials, skipped = napstr_state.find_orphans(
+            self.playlist, self.staging, minimum_age_seconds=120)
+
+        self.assertEqual(self.names(orphans), ["old.mp3"])
+        self.assertEqual(self.names(skipped), ["fresh.mp3"])
+
+    def test_without_an_age_filter_nothing_is_skipped(self):
+
+        self.write("fresh.mp3", age=0)
+
+        orphans, _partials, skipped = napstr_state.find_orphans(self.playlist, self.staging)
+
+        self.assertEqual(self.names(orphans), ["fresh.mp3"])
+        self.assertEqual(skipped, [])
+
+    def test_a_missing_folder_is_not_an_error(self):
+
+        missing = os.path.join(self.folder, "nope")
+
+        self.assertEqual(napstr_state.find_orphans(self.playlist, missing), ([], [], []))
+
+    def test_subfolders_are_left_alone(self):
+
+        os.makedirs(os.path.join(self.staging, "sub"))
+        self.write("stray.mp3")
+
+        orphans, _partials, _skipped = napstr_state.find_orphans(self.playlist, self.staging)
+
+        self.assertEqual(self.names(orphans), ["stray.mp3"])
 
 
 if __name__ == "__main__":

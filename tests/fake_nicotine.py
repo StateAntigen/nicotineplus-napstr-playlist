@@ -104,10 +104,27 @@ class FakeSearch:
             "the plugin fell back to Search.do_search, which spams the UI and the server")
 
 
+class FakeTransfer:
+    """One entry of ``core.downloads.transfers``, as far as the plugin reads it."""
+
+    def __init__(self, username, virtual_path, status="Queued"):
+        self.username = username
+        self.virtual_path = virtual_path
+        self.status = status
+        self.filename = virtual_path.rsplit("\\", 1)[-1]
+
+
 class FakeDownloads:
+    """Nicotine+ 3.3.10's ``Downloads``.
+
+    ``transfers`` is keyed by ``username + virtual_path`` and a second enqueue
+    for the same pair is ignored, both of which are real 3.3.10 behaviour that
+    the plugin's failure handling has to work with rather than around.
+    """
 
     def __init__(self):
         self.enqueued = []
+        self.transfers = {}
 
     def enqueue_download(self, username, virtual_path, folder_path=None, size=0,
                          file_attributes=None, bypass_all=False):
@@ -115,6 +132,24 @@ class FakeDownloads:
             "username": username, "path": virtual_path, "folder_path": folder_path,
             "size": size, "attributes": file_attributes
         })
+
+        key = username + virtual_path
+
+        if key not in self.transfers:
+            self.transfers[key] = FakeTransfer(username, virtual_path)
+
+    def fail(self, username, virtual_path, status):
+        """Mark a queued transfer dead, the way Nicotine+ does before aborting."""
+
+        key = username + virtual_path
+        self.transfers.setdefault(key, FakeTransfer(username, virtual_path)).status = status
+
+        return self.transfers[key]
+
+    def forget(self, username, virtual_path):
+        """Drop a transfer entirely, the way a cleared entry disappears."""
+
+        self.transfers.pop(username + virtual_path, None)
 
 
 class FakeNotifications:
