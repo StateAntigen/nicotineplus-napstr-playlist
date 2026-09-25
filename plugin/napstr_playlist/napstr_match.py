@@ -64,9 +64,20 @@ INFERRABLE_EXTENSIONS = ("mp3", "ogg", "oga", "opus", "m4a", "aac", "wma")
 MIN_PLAUSIBLE_KBPS = 32
 MAX_PLAUSIBLE_KBPS = 1411
 
+# Evidence that a filename names a different artist than the entry credits.
+# "Artist - Title" is the common naming, so a file claiming an artist that
+# shares nothing with the entry is usually another recording of another song.
+# A real playlist entry "Focus (feat. CLOVES)" by John Summit matched
+# "Go Back Feat. Julia Church - Sub Focus, Julia Church, John Summit (Orig Mix) 136.mp3"
+# at 0.98, because "focus" is the last word of the artist name "Sub Focus" and
+# "john summit" is a feature credit on somebody else's track. The title matched,
+# the artist matched, and the song was wrong.
+WRONG_ARTIST_PENALTY = 0.25
+
 _BRACKET_CONTENT = re.compile(r"[\(\[\{][^\)\]\}]*[\)\]\}]")
 _NON_ALPHANUMERIC = re.compile(r"[^a-z0-9]+")
 _MULTISPACE = re.compile(r"\s+")
+_ARTIST_SEPARATOR = re.compile(r"\s+-\s+")
 
 
 class ScoringOptions:
@@ -262,6 +273,68 @@ def _artist_tokens(entry):
     return _tokens(artist)
 
 
+def _title_tokens(entry):
+    """The entry's title as tokens, with bracketed credits removed."""
+
+    title = entry.get("title") or ""
+
+    return _tokens(_without_brackets(title) or title)
+
+
+def _credit_tokens(entry):
+    """Every artist credited on the entry, not just the first.
+
+    :func:`_artist_tokens` picks the primary credit, which is right for scoring
+    a file name that carries one artist. This is for the other question - "could
+    this file belong to the entry at all" - where a feature credit counts.
+    """
+
+    return _tokens(f"{entry.get('artist') or ''} {entry.get('album_artist') or ''}")
+
+
+def _claimed_artist_tokens(path):
+    """The artist a file name claims, from the text before its first " - ".
+
+    Returns ``[]`` when the name has no separator, because then it claims no
+    artist: "01 - Only I.mp3" claims "01", a track number and not a name.
+    Reading a claim out of a name that makes none is how a right file gets
+    rejected for the wrong reason.
+    """
+
+    base = (path or "").replace("\\", "/").rsplit("/", 1)[-1]
+
+    if not _ARTIST_SEPARATOR.search(base):
+        return []
+
+    return _tokens(_ARTIST_SEPARATOR.split(base, 1)[0])
+
+
+def names_a_different_artist(path, entry):
+    """True when a file credits an artist the entry does not.
+
+    The text before a file's first " - " is usually an artist, but plenty of
+    files - DJ pools especially - put the title there instead:
+    ``Hold on Me - Leena Punks, REYUS & Lauren L'aimant.mp3``. Treating that as
+    a different artist would reject correct files, so a zone that carries the
+    entry's own title is a reversed name and makes no claim at all.
+
+    Otherwise it must hold at least two tokens including a real word (three
+    characters or more, not a number) and share nothing with any of the entry's
+    credits. Checked against 99 recorded search choices: it fires on exactly the
+    one known wrong file and changes no other verdict.
+    """
+
+    claimed = _claimed_artist_tokens(path)
+
+    if len(claimed) < 2 or not any(len(token) >= 3 and not token.isdigit() for token in claimed):
+        return False
+
+    if set(_title_tokens(entry)) & set(claimed):
+        return False
+
+    return not (set(_credit_tokens(entry)) & set(claimed))
+
+
 def score_candidate(entry, path, size=None, attributes=None, options=None):
     """Score one candidate file against a playlist entry.
 
@@ -304,9 +377,17 @@ def score_candidate(entry, path, size=None, attributes=None, options=None):
     candidate_text = _path_to_text(path)
     candidate_tokens = candidate_text.split()
     entry_title_text = normalize_text(entry.get("title"))
-    entry_title_tokens = _tokens(_without_brackets(entry.get("title")) or entry.get("title"))
+    entry_title_tokens = _title_tokens(entry)
     artist_tokens = _artist_tokens(entry)
     album_tokens = _tokens(entry.get("album"))
+
+    if album_tokens and album_tokens == _tokens(entry.get("title")):
+        # Exportify repeats the track name in the album column, which a real
+        # playlist did for 87 of 100 entries. Scoring it again counts the same
+        # weak signal twice, and it is the weak one that lets a wrong file
+        # through: for the "Sub Focus" case the album contributed 67% of a
+        # title that had only matched inside another artist's name.
+        album_tokens = []
 
     title_ratio = _ratio(candidate_tokens, entry_title_tokens)
     artist_ratio = _ratio(candidate_tokens, artist_tokens) if artist_tokens else 0.0
@@ -368,6 +449,11 @@ def score_candidate(entry, path, size=None, attributes=None, options=None):
     if duration_severe:
         reasons.append("duration mismatch, likely a different recording or the wrong file")
         score -= options.duration_penalty
+
+    if names_a_different_artist(path, entry):
+        reasons.append(
+            "file credits a different artist: " + " ".join(_claimed_artist_tokens(path)[:3]))
+        score -= WRONG_ARTIST_PENALTY
 
     if options.preferred_extension != "any":
         if extension == options.preferred_extension:

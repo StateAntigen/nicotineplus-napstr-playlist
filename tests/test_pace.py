@@ -184,6 +184,44 @@ class DescriptionTest(unittest.TestCase):
         self.assertEqual(own_pace.limiting_reason(), "")
 
 
+class DeclinedServerIntervalTest(unittest.TestCase):
+    """Declining the server's floor must not hide the number it asked for."""
+
+    def setUp(self):
+
+        self.pacer = napstr_pace.SearchPacer(interval=60)
+        self.pacer.set_server_interval(720, enforce=False)
+
+    def test_the_pace_follows_the_setting(self):
+
+        self.assertEqual(self.pacer.interval, 60)
+
+    def test_the_detail_still_names_the_server_number(self):
+
+        detail = self.pacer.describe_detail()
+
+        self.assertIn("one search every 1 min", detail)
+        self.assertIn("server wait period 12 min, not enforced", detail)
+
+    def test_it_is_not_reported_as_the_thing_holding_the_pace_up(self):
+
+        self.assertEqual(self.pacer.limiting_reason(), "")
+
+    def test_enforcing_it_again_restores_the_floor(self):
+
+        self.pacer.set_server_interval(720, enforce=True)
+
+        self.assertEqual(self.pacer.interval, 720)
+        self.assertEqual(self.pacer.limiting_reason(), "server_wait_period")
+
+    def test_a_zero_server_interval_is_never_shown(self):
+
+        pacer = napstr_pace.SearchPacer(interval=60)
+        pacer.set_server_interval(0)
+
+        self.assertNotIn("server wait period", pacer.describe_detail())
+
+
 class PacingTest(unittest.TestCase):
 
     def test_first_search_is_allowed_immediately(self):

@@ -26,7 +26,7 @@ Exportify CSV  ->  per-entry Soulseek search  ->  scored candidates
 | `plugin/napstr_playlist/napstr_relay.py` | RFC 6455 WebSocket client and Nostr relay pool |
 | `plugin/napstr_playlist/napstr_event.py` | Kind 30425 event build, sign and validate |
 | `plugin/napstr_playlist/napstr_dialog.py` | Optional GTK4 review window |
-| `tests/` | 195 unit tests, runnable with any Python 3.8+ interpreter |
+| `tests/` | 215 unit tests, runnable with any Python 3.8+ interpreter |
 | `tools/selfcheck.py` | Static checks (compile, undefined attributes, callback ownership) |
 | `tools/reset_playlist.py` | Clears a playlist's decisions, re-queues files that no longer pass the filters |
 | `tools/deploy.ps1` | Installs/uninstalls the plugin into `%APPDATA%\nicotine\plugins` |
@@ -109,6 +109,15 @@ Changed your filters and want another go at the entries you are unhappy with?
 again and skips the hash step if you keep the file. `forget` drops the file
 too, so the entry is searched, downloaded and hashed afresh.
 
+An entry that already has a hashed file is left alone by `/napstr auto` rather
+than fetched a second time: the second copy lands beside the first as
+`Name (1).mp3` and nothing ever links to it. To ask for a different file on
+purpose, `/napstr forget <entry>` first.
+
+Note that `/napstr reset missing` skips entries that are queued or downloading,
+so after a stalled batch use `/napstr reset all` (which keeps file IDs) followed
+by `/napstr auto missing`.
+
 Full command list: `/napstr help`.
 
 ## Search pace and server bans
@@ -176,7 +185,18 @@ Each entry is scored on artist (40%), title (45%), album (5%) and duration
   `instrumental`, `sped up`, ...) unless the playlist entry names one;
 * a penalty when the duration is more than four tolerances away, so a wrong
   edit does not get auto-downloaded;
+* a penalty when the file name credits an artist the entry does not, which is
+  what catches a file whose title "matched" only because the title is the last
+  word of another artist's name: an entry `Focus (feat. CLOVES)` by John Summit
+  once scored 0.98 against
+  `Go Back Feat. Julia Church - Sub Focus, Julia Church, John Summit (Orig Mix) 136.mp3`,
+  a different song, because "focus" came from `Sub Focus` and "john summit" was
+  a feature credit on somebody else's track;
 * a bonus for your preferred format.
+
+The album column is ignored when it just repeats the title, which Exportify does
+(87 of 100 entries in a real playlist). Counting it again scores the same weak
+evidence twice, and it is the weak evidence that lets a wrong file through.
 
 Anything scoring at or above `auto_pick_threshold` (default `0.8`) is
 downloaded automatically; everything else waits for `/napstr pick`. `/napstr

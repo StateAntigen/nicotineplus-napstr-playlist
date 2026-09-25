@@ -64,6 +64,18 @@ def write_csv(name="Rock.csv"):
     return path
 
 
+def write_audio_file(name="have.mp3", content=b"x" * 4096):
+    """A stand-in for a downloaded file, for entries that already hold one."""
+
+    folder = tempfile.mkdtemp(prefix="napstr-have-")
+    path = os.path.join(folder, name)
+
+    with open(path, "wb") as file_handle:
+        file_handle.write(content)
+
+    return path
+
+
 class PluginTestCase(unittest.TestCase):
     """A fresh plugin instance against a fresh fake host, per test."""
 
@@ -403,6 +415,106 @@ class BanHandlingTest(PluginTestCase):
 
         self.assertEqual(self.plugin._pacer.requested_interval, backed_off)
         self.assertGreater(backed_off, self.plugin.settings["search_interval"])
+
+    def test_a_declined_server_interval_is_still_reported(self):
+        """Hiding the number when it is not enforced is how "why so slow" dies."""
+
+        self.core.search.wishlist_interval = 720
+        self.plugin.settings["respect_server_interval"] = False
+        self.plugin.settings["search_interval"] = 60
+        self.plugin._configure_pacer()
+
+        self.assertEqual(self.plugin._pacer.interval, 60)
+        self.assertIn("server wait period 12 min, not enforced",
+                      self.plugin._pacer.describe_detail())
+
+        self.load_playlist()
+        self.assertIn("server wait period 12 min, not enforced", self.run_command("status"))
+
+    def test_auto_does_not_fetch_a_second_copy_of_a_track_we_have(self):
+        """The duplicate downloads: an entry with a hash was searched again."""
+
+        playlist = self.load_playlist()
+        entry = playlist.entries[0]
+        path = write_audio_file()
+
+        entry["file_id"] = "ab" * 32
+        entry["local_path"] = path
+        entry["candidates"] = [{
+            "username": "user1", "path": "Music\\Metallica\\Enter Sandman.mp3",
+            "size": 8 * 1024 * 1024, "bitrate": 320, "length": 331
+        }]
+
+        self.run_command("auto all")
+
+        self.assertEqual(self.core.downloads.enqueued, [])
+        self.assertEqual(entry["status"], "hashed")
+        self.assertIn("skipped a duplicate download", entry["notes"] or "")
+
+    def test_auto_all_says_how_many_entries_already_have_files(self):
+
+        playlist = self.load_playlist()
+        entry = playlist.entries[0]
+        entry["file_id"] = "cd" * 32
+        entry["local_path"] = write_audio_file()
+
+        message = self.run_command("auto all")
+
+        self.assertIn("already have a hashed file", message)
+        self.assertIn("/napstr forget", message)
+
+    def test_forget_then_auto_does_fetch_a_replacement(self):
+        """The escape hatch: asking for a different file is explicit."""
+
+        playlist = self.load_playlist()
+        entry = playlist.entries[0]
+        entry["file_id"] = "ef" * 32
+        entry["local_path"] = write_audio_file()
+
+        self.run_command("forget 1")
+
+        self.assertEqual(entry["file_id"], "")
+
+        entry["candidates"] = [{
+            "username": "user2", "path": "Music\\Metallica\\Enter Sandman (2).mp3",
+            "size": 8 * 1024 * 1024, "bitrate": 320, "length": 331
+        }]
+
+        self.run_command("auto 1")
+
+        self.assertEqual(len(self.core.downloads.enqueued), 1)
+
+    def test_a_missing_file_does_not_block_a_fresh_download(self):
+        """A hash whose file was deleted must not stop the entry being filled."""
+
+        playlist = self.load_playlist()
+        entry = playlist.entries[0]
+        entry["file_id"] = "12" * 32
+        entry["local_path"] = os.path.join(tempfile.mkdtemp(), "gone.mp3")
+        entry["candidates"] = [{
+            "username": "user1", "path": "Music\\Metallica\\Enter Sandman.mp3",
+            "size": 8 * 1024 * 1024, "bitrate": 320, "length": 331
+        }]
+
+        self.run_command("auto all")
+
+        self.assertEqual(len(self.core.downloads.enqueued), 1)
+
+    def test_the_choice_records_what_it_was_chosen_on(self):
+        """An audit later must be able to re-score the pair it is looking at."""
+
+        playlist = self.load_playlist()
+        entry = playlist.entries[0]
+        entry["candidates"] = [{
+            "username": "user1", "path": "Music\\Metallica\\Enter Sandman.mp3",
+            "size": 8 * 1024 * 1024, "bitrate": 320, "length": 331
+        }]
+
+        self.run_command("auto 1")
+
+        self.assertEqual(entry["chosen"]["bitrate"], 320)
+        self.assertEqual(entry["chosen"]["length"], 331)
+        self.assertEqual(entry["chosen"]["username"], "user1")
 
     def test_bans_and_disconnects_are_not_rate_warnings(self):
 

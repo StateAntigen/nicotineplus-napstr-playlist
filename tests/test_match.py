@@ -358,5 +358,106 @@ class DescribeTest(unittest.TestCase):
         self.assertEqual(napstr_match.describe_candidate({"path": "a.mp3"}).strip(), "a.mp3")
 
 
+class ReversedAndWrongArtistTest(unittest.TestCase):
+    """Cases taken from a real 100 track playlist.
+
+    One entry had picked a file that was a different song, scoring 0.98, and six
+    files that were correct would have been rejected by a naive fix. Both halves
+    matter: the fix is only right if it separates them.
+    """
+
+    FOCUS = {
+        "title": "Focus (feat. CLOVES)",
+        "artist": "John Summit;CLOVES",
+        "album": "Focus (feat. CLOVES)",
+        "duration_ms": 238242
+    }
+
+    # "Go Back" by Sub Focus, which the entry picked. The title "focus" matched
+    # the last word of the artist name, "john summit" was a feature credit, and
+    # the album column repeats the title, so the same weak signal scored twice.
+    WRONG_PATH = ("@@yoewb\\SLSK\\Beatport - Top Streamed Tracks 2026 Drum & Bass\\"
+                  "Go Back Feat. Julia Church - Sub Focus, Julia Church, John Summit "
+                  "(Original Mix) 136.mp3")
+
+    def test_a_file_credited_to_another_artist_is_rejected(self):
+
+        score, reasons = napstr_match.score_candidate(
+            self.FOCUS, self.WRONG_PATH, size=9176448,
+            attributes={"bitrate": 320, "length": 238})
+
+        self.assertLess(score, 0.8)
+        self.assertTrue(any(reason.startswith("file credits a different artist")
+                            for reason in reasons), reasons)
+
+    def test_the_album_column_repeating_the_title_counts_once(self):
+
+        _score, reasons = napstr_match.score_candidate(
+            self.FOCUS, self.WRONG_PATH, size=9176448,
+            attributes={"bitrate": 320, "length": 238})
+
+        self.assertFalse(any(reason.startswith("album matched") for reason in reasons), reasons)
+
+    def test_a_real_album_is_still_scored(self):
+
+        entry = dict(ENTRY, album="The Black Album")
+
+        _score, reasons = napstr_match.score_candidate(
+            entry, "Music\\Metallica\\The Black Album\\01 - Enter Sandman.mp3",
+            size=7000000, attributes={"bitrate": 320, "length": 331})
+
+        self.assertTrue(any(reason.startswith("album matched") for reason in reasons), reasons)
+
+    def test_the_correct_file_for_that_entry_still_wins(self):
+        """The right track is number prefixed, so its name claims no artist."""
+
+        score, reasons = napstr_match.score_candidate(
+            self.FOCUS, "NEWMUSICFRIDAY\\WK3\\24 - John Summit, CLOVES - Focus (feat. CLOVES).mp3",
+            size=9176448, attributes={"bitrate": 320, "length": 238})
+
+        self.assertGreaterEqual(score, 0.8, reasons)
+
+    def test_a_title_first_name_is_not_a_different_artist(self):
+        """Six real files are named "Title - Artist" and must not be punished."""
+
+        cases = [
+            ("Hold On Me", "Leena Punks;REYUS;Lauren L'aimant", "Hold on Me - Leena Punks, REYUS & Lauren L'aimant.mp3"),
+            ("Feels Like Us", "Devault;GiGi Grombacher", "Feels Like Us - Devault.mp3"),
+            ("Give Me Life", "19:26;Gadouh", "Give Me Life - 19_26 & Gadouh.mp3"),
+            ("My Love For You", "DANNY AVILA", "My Love For You - DANNY AVILA.mp3"),
+            ("million angels", "Aaron Hibell", "million angels - Aaron Hibell.mp3"),
+        ]
+
+        for title, artist, filename in cases:
+            with self.subTest(title=title):
+                entry = {"title": title, "artist": artist, "album": title,
+                         "duration_ms": 200000}
+                score, reasons = napstr_match.score_candidate(
+                    entry, f"DJPool\\{filename}", size=8000000,
+                    attributes={"bitrate": 320, "length": 200})
+
+                self.assertGreaterEqual(score, 0.8, reasons)
+                self.assertFalse(any(reason.startswith("file credits a different artist")
+                                     for reason in reasons), reasons)
+
+    def test_a_numbered_name_makes_no_artist_claim(self):
+
+        entry = {"title": "Only I", "artist": "Hayla", "album": "Dusk",
+                 "duration_ms": 200000}
+
+        score, reasons = napstr_match.score_candidate(
+            entry, "Music\\Hayla\\[2024] Dusk\\01 - Only I.mp3", size=8000000,
+            attributes={"bitrate": 320, "length": 200})
+
+        self.assertGreaterEqual(score, 0.8, reasons)
+
+    def test_the_helper_stands_alone(self):
+
+        self.assertTrue(napstr_match.names_a_different_artist(self.WRONG_PATH, self.FOCUS))
+        self.assertFalse(napstr_match.names_a_different_artist(
+            "Pools\\million angels - Aaron Hibell.mp3",
+            {"title": "million angels", "artist": "Aaron Hibell"}))
+
+
 if __name__ == "__main__":
     unittest.main()

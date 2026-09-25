@@ -113,6 +113,7 @@ class SearchPacer:
         self.minimum = max(float(minimum), 1.0)
         self.requested_interval = float(interval or DEFAULT_SEARCH_INTERVAL)
         self.server_interval = float(server_interval or 0)
+        self.enforce_server_interval = True
         self.last_search_at = None
         self.paused = False
         self.pause_reason = ""
@@ -122,18 +123,29 @@ class SearchPacer:
 
     @property
     def interval(self):
-        """The effective gap: the strictest of the three floors."""
+        """The effective gap: the strictest of the floors in force."""
 
-        return max(self.minimum, self.requested_interval, self.server_interval)
+        floors = [self.minimum, self.requested_interval]
+
+        if self.enforce_server_interval:
+            floors.append(self.server_interval)
+
+        return max(floors)
 
     def set_interval(self, interval):
 
         self.requested_interval = float(interval or DEFAULT_SEARCH_INTERVAL)
 
-    def set_server_interval(self, server_interval):
-        """Adopt the server's own automated-search pace when it tells us one."""
+    def set_server_interval(self, server_interval, enforce=True):
+        """Record the server's own automated-search pace when it tells us one.
+
+        Kept even when it is not enforced, because "why is this searching so
+        slowly" is answered by the number, and hiding it when the user declines
+        the floor takes away the only place it is visible.
+        """
 
         self.server_interval = max(float(server_interval or 0), 0)
+        self.enforce_server_interval = bool(enforce)
 
     def slow_down(self, factor=2.0, ceiling=MAX_SEARCH_INTERVAL):
         """Back off after a server warning and return the new requested pace.
@@ -215,8 +227,9 @@ class SearchPacer:
         parts = [f"your setting {human_duration(self.requested_interval)}"]
 
         if self.server_interval:
+            suffix = "" if self.enforce_server_interval else ", not enforced"
             parts.append(
-                f"server wait period {human_duration(self.server_interval)}")
+                f"server wait period {human_duration(self.server_interval)}{suffix}")
 
         parts.append(f"hard floor {human_duration(self.minimum)}")
 
@@ -228,7 +241,8 @@ class SearchPacer:
         if self.paused:
             return self.pause_reason
 
-        if self.server_interval >= max(self.requested_interval, self.minimum):
+        if self.enforce_server_interval and self.server_interval >= max(
+                self.requested_interval, self.minimum):
             return "server_wait_period"
 
         if self.minimum >= self.requested_interval:

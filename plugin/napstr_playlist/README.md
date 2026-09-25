@@ -22,8 +22,12 @@ the plugin settings hold your Nostr key, relays and matching preferences.
 **Downloads are filtered.** A candidate is rejected outright when its format is
 excluded (`flac` by default), its bitrate falls outside your minimum and maximum,
 or its size falls outside yours, and an entry whose every candidate is rejected
-is marked `unavailable` instead of getting the least bad one. `/napstr reset
-<entry|missing|all>` re-queues entries that you want searched again.
+is marked `unavailable` instead of getting the least bad one. A file name that
+credits a different artist than the entry also loses points, which is what stops
+a file whose title only "matched" inside another artist's name from winning.
+`/napstr reset <entry|missing|all>` re-queues entries that you want searched
+again; an entry that already has a hashed file is left alone by `/napstr auto`
+so that it is not downloaded twice.
 
 **Searching is paced on purpose.** One search is in flight at a time, 60 seconds
 apart by default and never faster than 45 seconds, because the Soulseek server

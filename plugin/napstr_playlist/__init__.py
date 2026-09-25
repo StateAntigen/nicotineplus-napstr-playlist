@@ -906,6 +906,16 @@ class Plugin(BasePlugin):
             self.output("Usage: /napstr auto <entry number|all|missing>")
             return False
 
+        already = [position for position in positions
+                   if self._has_a_usable_file(self.playlist.entry(position) or {})]
+
+        if already:
+            self.output(
+                f"{len(already)} of those {len(positions)} entries already have a hashed file; "
+                "they will be left alone. Use /napstr forget <entry> before auto to fetch a "
+                "different file on purpose, or /napstr auto missing to search only what is "
+                "missing.")
+
         # Entries that already collected candidates can be decided right away
         pending = []
 
@@ -1068,7 +1078,11 @@ class Plugin(BasePlugin):
         """
 
         if not self.settings.get("respect_server_interval", True):
-            self._pacer.set_server_interval(0)
+            # Still recorded, just not enforced: /napstr status has to be able to
+            # show what the server asked for, or slow searching cannot be
+            # explained.
+            self._pacer.set_server_interval(
+                getattr(self.core.search, "wishlist_interval", 0), enforce=False)
             return
 
         server_interval = getattr(self.core.search, "wishlist_interval", 0)
@@ -1371,6 +1385,21 @@ class Plugin(BasePlugin):
         self._auto_positions.discard(position)
 
         if automatic and best["score"] >= threshold:
+
+            if self._has_a_usable_file(entry):
+                # Downloading a second copy of a track that is already hashed
+                # wastes bandwidth and leaves the entry pointing at the original
+                # regardless: the new file lands beside it as "Name (1).mp3" and
+                # nothing ever links to it. /napstr forget is how to ask for a
+                # different file on purpose.
+                self.playlist.set_status(
+                    entry, napstr_state.STATUS_HASHED,
+                    "already have this file; skipped a duplicate download")
+                self._report(
+                    f"Entry {position} already has a hashed file; no second copy queued.")
+                self._save_playlist()
+                return
+
             self._download_candidate(entry, best, automatic=True)
             self._save_playlist()
             return
@@ -1462,6 +1491,21 @@ class Plugin(BasePlugin):
 
         return True
 
+    def _has_a_usable_file(self, entry):
+        """True when the entry already has a hashed file that is still on disk.
+
+        /napstr reset keeps file IDs, so an entry can be searched again while it
+        already holds a good file. /napstr auto all then used to fetch a second
+        copy of every one of them.
+        """
+
+        if not entry.get("file_id"):
+            return False
+
+        local_path = str(entry.get("local_path") or "")
+
+        return bool(local_path) and os.path.isfile(local_path)
+
     def _download_candidate(self, entry, candidate, automatic=False):
 
         folder_path = self._staging_folder()
@@ -1493,7 +1537,12 @@ class Plugin(BasePlugin):
             "username": candidate.get("username", ""),
             "path": candidate.get("path", ""),
             "size": int(candidate.get("size") or 0),
-            "score": candidate.get("score")
+            "score": candidate.get("score"),
+            # Recorded so the decision can be re-checked later. Without them a
+            # later audit scores the same pair without its duration and reports
+            # a good pick as a bad one (0.75 instead of 0.80 on real data).
+            "bitrate": candidate.get("bitrate"),
+            "length": candidate.get("length")
         }
         entry["score"] = candidate.get("score")
         self.playlist.set_status(entry, napstr_state.STATUS_QUEUED)
