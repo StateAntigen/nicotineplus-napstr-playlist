@@ -1654,6 +1654,20 @@ class Plugin(BasePlugin):
         self._save_playlist()
         self.output(f"Cleared the search state of {changed} entr(y/ies){kept}.")
 
+        if not drop_files:
+            # A reset keeps the file, so /napstr auto will not fetch a replacement
+            # for those entries. Saying so here is the difference between "it
+            # ignored my reset" and knowing that forget is the command you want.
+            held = [entry["position"] for entry in self.playlist.entries
+                    if entry.get("file_id") and entry.get("local_path")]
+
+            if held:
+                self.output(
+                    f"{len(held)} entr(y/ies) still hold a file, so /napstr auto will leave them "
+                    "alone: " + ", ".join(str(position) for position in held[:10])
+                    + ("..." if len(held) > 10 else "")
+                    + " Use /napstr forget <entry> to fetch a different file for one of them.")
+
         return True
 
     def _action_setpath(self, rest):

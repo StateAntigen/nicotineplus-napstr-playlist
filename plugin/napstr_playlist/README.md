@@ -25,9 +25,13 @@ or its size falls outside yours, and an entry whose every candidate is rejected
 is marked `unavailable` instead of getting the least bad one. A file name that
 credits a different artist than the entry also loses points, which is what stops
 a file whose title only "matched" inside another artist's name from winning.
-`/napstr reset <entry|missing|all>` re-queues entries that you want searched
-again; an entry that already has a hashed file is left alone by `/napstr auto`
-so that it is not downloaded twice.
+`/napstr reset <entry|missing|all>` clears the search results but keeps the file
+ID and the local file, so it re-searches without re-hashing. To ask for a
+different file on purpose, `/napstr forget <entry>` instead: it drops the file
+ID too, which is also what lets `/napstr auto` fetch a replacement (an entry
+that already has a hashed file is left alone, so that a track is never
+downloaded twice). Note that `reset missing` skips queued and downloading
+entries, so after a stalled batch use `reset all` followed by `auto missing`.
 
 **Searching is paced on purpose.** One search is in flight at a time, 60 seconds
 apart by default and never faster than 45 seconds, because the Soulseek server

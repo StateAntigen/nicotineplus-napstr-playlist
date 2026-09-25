@@ -500,6 +500,35 @@ class BanHandlingTest(PluginTestCase):
 
         self.assertEqual(len(self.core.downloads.enqueued), 1)
 
+    def test_reset_says_when_auto_will_skip_the_entries_it_kept(self):
+        """A reset keeps the file, so auto will not fetch a replacement.
+
+        Without this the reset looks ignored: the user resets an entry they think
+        is wrong, auto skips it, and nothing explains why.
+        """
+
+        playlist = self.load_playlist()
+        entry = playlist.entries[0]
+        entry["file_id"] = "34" * 32
+        entry["local_path"] = write_audio_file()
+        entry["candidates"] = [{"username": "u", "path": "p"}]
+
+        message = self.run_command("reset all")
+
+        self.assertIn("still hold a file", message)
+        self.assertIn("/napstr forget", message)
+        self.assertEqual(entry["file_id"], "34" * 32)
+
+    def test_forget_does_not_print_the_reset_hint(self):
+
+        playlist = self.load_playlist()
+        playlist.entries[0]["file_id"] = "56" * 32
+        playlist.entries[0]["local_path"] = write_audio_file()
+
+        message = self.run_command("forget all")
+
+        self.assertNotIn("still hold a file", message)
+
     def test_the_choice_records_what_it_was_chosen_on(self):
         """An audit later must be able to re-score the pair it is looking at."""
 
