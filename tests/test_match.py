@@ -191,6 +191,64 @@ class MegabyteTest(unittest.TestCase):
             self.assertNotIn(stub, found)
 
 
+class LosslessAliasTest(unittest.TestCase):
+    """"lossless" must cover every lossless container, not just flac.
+
+    A real playlist excluded flac only, and then grabbed a 58 MiB .aif and a
+    34.6 MiB .aiff, because "exclude flac" does not exclude the other ways of
+    saying the same thing.
+    """
+
+    def test_the_alias_expands_to_every_lossless_container(self):
+
+        self.assertEqual(napstr_match.expand_extensions(["lossless"]),
+                         list(napstr_match.LOSSLESS_EXTENSIONS))
+        self.assertIn("aif", napstr_match.expand_extensions(["lossless"]))
+        self.assertIn("aiff", napstr_match.expand_extensions(["lossless"]))
+
+    def test_it_mixes_with_ordinary_names(self):
+
+        expanded = napstr_match.expand_extensions(["mp3", "lossless", "FLAC"])
+
+        self.assertEqual(expanded[0], "mp3")
+        self.assertEqual(len(expanded), len(napstr_match.LOSSLESS_EXTENSIONS) + 1)
+        self.assertEqual(len(set(expanded)), len(expanded), "no duplicates")
+
+    def test_ordinary_names_are_untouched(self):
+
+        self.assertEqual(napstr_match.expand_extensions(["flac", ".WAV", " ", None]),
+                         ["flac", "wav"])
+        self.assertEqual(napstr_match.expand_extensions([]), [])
+        self.assertEqual(napstr_match.expand_extensions(None), [])
+
+    def test_the_two_real_files_are_now_rejected(self):
+
+        options = napstr_match.ScoringOptions(
+            excluded_extensions=napstr_match.expand_extensions(["lossless"]),
+            min_bitrate=192)
+
+        for filename, size in (("Dakota, YOTTO - Deep Dive (Extended Mix) - jkmk.net.aif",
+                                60711712),
+                               ("Joris Voorn - Seventeen.aiff", 36280730)):
+            with self.subTest(filename=filename):
+                score, reasons = napstr_match.score_candidate(
+                    ENTRY, f"Music\\Promo\\{filename}", size=size, options=options)
+
+                self.assertEqual(score, 0.0)
+                self.assertTrue(reasons[0].startswith("excluded format:"), reasons)
+
+    def test_a_lossy_file_is_still_accepted(self):
+
+        options = napstr_match.ScoringOptions(
+            excluded_extensions=napstr_match.expand_extensions(["lossless"]))
+
+        score, _reasons = napstr_match.score_candidate(
+            ENTRY, "Music\\Metallica\\Enter Sandman.mp3", size=8000000,
+            attributes={"bitrate": 320, "length": 331}, options=options)
+
+        self.assertGreaterEqual(score, 0.8)
+
+
 class ScoreTest(unittest.TestCase):
 
     def test_a_confident_match_scores_high(self):

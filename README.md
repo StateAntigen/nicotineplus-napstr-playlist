@@ -212,7 +212,7 @@ were dropped by them.
 
 | Filter | Setting | Notes |
 | --- | --- | --- |
-| Format | `excluded_formats` | `flac` is excluded by default; add `aif`, `wav`, ... |
+| Format | `excluded_formats` | `flac` is excluded by default; the word `lossless` covers `flac`, `aif`, `aiff`, `wav`, `ape`, `wv`, `alac`, `dsf`, `dff` and `tta` in one entry |
 | Format | `preferred_format` | Soft preference (a score bonus), not a filter |
 | Bitrate | `min_bitrate`, `max_bitrate` | kbps; `0` means "no limit". A reported bitrate is trusted, a local file's size is only checked when the format lets it be inferred |
 | Size | `min_size_mb`, `max_size_mb` | MB; `0` means "no limit" |
@@ -302,7 +302,7 @@ discovery always includes the `#t` marker filter.
 | `search_interval` | 60 s | Gap between searches (floor 45 s; the server bans floods) |
 | `respect_server_interval` | on | Also wait out the server's wishlist wait period |
 | `preferred_format` | `any` | `flac`, `mp3`, `ogg`, `opus`, `m4a`, `wav` |
-| `excluded_formats` | `flac` | Formats never downloaded (`flac`, `aif`, `wav`, ...) |
+| `excluded_formats` | `flac` | Formats never downloaded; the word `lossless` covers them all |
 | `min_bitrate` | 0 | Reject candidates and files below this bitrate (kbps) |
 | `max_bitrate` | 0 | Reject candidates and files above this bitrate (kbps) |
 | `min_size_mb` | 0 | Reject files smaller than this (MB) |

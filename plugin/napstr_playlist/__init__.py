@@ -154,7 +154,8 @@ class Plugin(BasePlugin):
                 "options": FORMAT_CHOICES
             },
             "excluded_formats": {
-                "description": "Formats never to download (e.g. flac):",
+                "description": ("Formats never to download. The word 'lossless' covers flac, "
+                                "aif, aiff, wav, ape, wv, alac, dsf, dff and tta"),
                 "group": "Matching",
                 "type": "list string"
             },
@@ -320,16 +321,9 @@ class Plugin(BasePlugin):
         )
 
     def _excluded_extensions(self):
+        """Formats never to download; the word "lossless" means all of them."""
 
-        excluded = []
-
-        for value in self.settings.get("excluded_formats") or []:
-            extension = napstr_match.normalise_extension(value)
-
-            if extension and extension not in excluded:
-                excluded.append(extension)
-
-        return excluded
+        return napstr_match.expand_extensions(self.settings.get("excluded_formats") or [])
 
     def _filter_summary(self):
         """One line describing the active hard filters, for /napstr status."""

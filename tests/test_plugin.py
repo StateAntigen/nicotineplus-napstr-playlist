@@ -799,6 +799,19 @@ class FilterTest(PluginTestCase):
         self.assertEqual(options.max_bitrate, 320)
         self.assertEqual(options.min_size_bytes, 2 * 1024 * 1024)
 
+    def test_the_lossless_word_in_the_setting_excludes_everything_lossless(self):
+        """Setting "lossless" must reject the formats "flac" alone missed."""
+
+        self.plugin.settings["excluded_formats"] = ["flac", "lossless"]
+
+        excluded = self.plugin._excluded_extensions()
+
+        for extension in ("flac", "aif", "aiff", "wav", "ape", "alac", "dsf"):
+            self.assertIn(extension, excluded)
+
+        self.assertIn("excluding", self.plugin._filter_summary())
+        self.assertIn("aiff", self.plugin._filter_summary())
+
     def test_a_flac_pick_is_never_downloaded(self):
 
         playlist = self.load_playlist()

@@ -101,16 +101,9 @@ def resolve_playlist(data_folder_path, wanted):
 
 
 def parse_extensions(value):
+    """Split a comma separated format list, expanding the word "lossless"."""
 
-    parsed = []
-
-    for chunk in str(value or "").replace(";", ",").split(","):
-        extension = napstr_match.normalise_extension(chunk)
-
-        if extension and extension not in parsed:
-            parsed.append(extension)
-
-    return parsed
+    return napstr_match.expand_extensions(str(value or "").replace(";", ",").split(","))
 
 
 def megabytes_to_bytes(value):
@@ -310,7 +303,8 @@ def main():
     parser.add_argument("--playlist", default="",
                         help="Playlist id, title or file name (default: the only playlist)")
     parser.add_argument("--exclude", default=DEFAULT_EXCLUDED,
-                        help=f"Formats to treat as unwanted (default: {DEFAULT_EXCLUDED})")
+                        help=("Formats to treat as unwanted; 'lossless' covers them all "
+                              f"(default: {DEFAULT_EXCLUDED})"))
     parser.add_argument("--min-bitrate", type=int, default=0)
     parser.add_argument("--max-bitrate", type=int, default=0)
     parser.add_argument("--min-size-mb", type=int, default=0)

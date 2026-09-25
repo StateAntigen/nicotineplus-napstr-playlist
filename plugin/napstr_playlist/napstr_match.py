@@ -22,6 +22,7 @@ __all__ = [
     "candidate_attributes",
     "compare_candidate",
     "describe_candidate",
+    "expand_extensions",
     "find_local_matches",
     "find_ranked_candidates",
     "megabytes_to_bytes",
@@ -53,6 +54,13 @@ AUDIO_EXTENSIONS = (
 )
 
 LOSSLESS_EXTENSIONS = ("flac", "wav", "aiff", "aif", "ape", "wv", "alac", "dsf", "dff", "tta")
+
+# The word "lossless" in an excluded-format list stands for every container in
+# LOSSLESS_EXTENSIONS, so a filter that means "no lossless" cannot miss one. A
+# real playlist whose only excluded format was flac went on to grab a 58 MiB
+# .aif and a 34.6 MiB .aiff, because "exclude flac" does not exclude the other
+# ways of saying the same thing.
+LOSSLESS_ALIAS = "lossless"
 
 # Extension whose bitrate can be inferred from size and duration well enough to
 # spot a file that cannot possibly be the desired track.
@@ -144,6 +152,30 @@ def megabytes_to_bytes(value):
         return 0
 
     return int(megabytes * 1024 * 1024) if megabytes > 0 else 0
+
+
+def expand_extensions(values):
+    """Normalise a list of format names, expanding the word "lossless".
+
+    Lives here rather than in the plugin so that the plugin and the reset tool
+    cannot disagree about what the excluded-formats setting means.
+    """
+
+    expanded = []
+
+    for value in values or ():
+        extension = normalise_extension(value)
+
+        if not extension:
+            continue
+
+        candidates = LOSSLESS_EXTENSIONS if extension == LOSSLESS_ALIAS else (extension,)
+
+        for candidate in candidates:
+            if candidate not in expanded:
+                expanded.append(candidate)
+
+    return expanded
 
 
 def normalize_text(value):
