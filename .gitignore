@@ -1,0 +1,10 @@
+# Byte-compiled files embed the absolute source path (and therefore the local
+# user name), so they must never be committed.
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Local build/release output
+dist/
+build/
+*.zip

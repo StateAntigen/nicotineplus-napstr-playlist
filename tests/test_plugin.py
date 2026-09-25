@@ -1,0 +1,789 @@
+# SPDX-FileCopyrightText: 2026 StateAntigen
+# SPDX-License-Identifier: 0BSD
+"""Behavioural tests for the plugin, run against a fake Nicotine+ host.
+
+The plugin is instantiated for real and driven through ``/napstr`` commands,
+which is what catches the mistakes a static check cannot: wrong attribute names
+in the host API, missing initialisers, and - the reason this file exists -
+anything that would send searches too fast.
+
+The single most important assertion here is that a batch of searches is paced
+and never overlaps: an earlier version sent 100 searches in 215 seconds and the
+account was banned for 30 minutes.
+"""
+
+import hashlib
+import os
+import sys
+import tempfile
+import time
+import unittest
+
+TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(TESTS_DIR)
+PLUGIN_DIR = os.path.join(REPO_ROOT, "plugin", "napstr_playlist")
+
+# The fake host must be importable before the plugin module is
+sys.path.insert(0, TESTS_DIR)
+sys.path.insert(0, os.path.join(REPO_ROOT, "plugin"))
+sys.path.insert(0, PLUGIN_DIR)
+
+import fake_nicotine  # noqa: E402  pylint: disable=wrong-import-position
+
+DATA_FOLDER = tempfile.mkdtemp(prefix="napstr-test-")
+
+SCHEDULER, CORE, CONFIG, _BASE = fake_nicotine.install(DATA_FOLDER)
+
+import napstr_playlist  # noqa: E402  pylint: disable=wrong-import-position
+import napstr_event  # noqa: E402  pylint: disable=wrong-import-position
+import napstr_pace  # noqa: E402  pylint: disable=wrong-import-position
+import napstr_relay  # noqa: E402  pylint: disable=wrong-import-position
+
+BAN_MESSAGE = (
+    "You have been banned for 30 minutes. This is usually the result of doing too many "
+    "operations at once. Do not quickly repeat a search."
+)
+
+SECRET_KEY = "B7E151628AED2A6ABF7158809CF4F3C762E7160F38B4DA56A784D9045190CFEF"
+
+CSV_HEADER = "Track URI,Track Name,Artist Name(s),Album Name,Track Duration (ms)"
+CSV_ROWS = [
+    "spotify:track:1,Enter Sandman,Metallica,Metallica,331000",
+    "spotify:track:2,Rooster,Alice In Chains;Layne Staley,Dirt,250000",
+    "spotify:track:3,Human Now (feat. Luke Steele),Anyma;Luke Steele,Genesys,200000"
+]
+
+
+def write_csv(name="Rock.csv"):
+
+    path = os.path.join(DATA_FOLDER, name)
+
+    with open(path, "w", encoding="utf-8", newline="") as file_handle:
+        file_handle.write("\r\n".join([CSV_HEADER] + CSV_ROWS) + "\r\n")
+
+    return path
+
+
+class PluginTestCase(unittest.TestCase):
+    """A fresh plugin instance against a fresh fake host, per test."""
+
+    def setUp(self):
+
+        SCHEDULER.callbacks.clear()
+        SCHEDULER.scheduled.clear()
+        SCHEDULER.cancelled.clear()
+
+        self.core = CORE
+        self.core.search = fake_nicotine.FakeSearch()
+        self.core.downloads = fake_nicotine.FakeDownloads()
+        self.core.notifications = fake_nicotine.FakeNotifications()
+
+        self.plugin = napstr_playlist.Plugin()
+        self.plugin.core = self.core
+        self.plugin.config = CONFIG
+        self.plugin.human_name = "NAPSTR Playlist"
+        self.plugin.settings["nostr_key"] = SECRET_KEY
+        self.plugin.init()
+
+        self.addCleanup(self._stop_plugin)
+
+    def _stop_plugin(self):
+        self.plugin._shutting_down = True
+
+    # -- helpers -----------------------------------------------------------
+
+    def run_command(self, argument):
+        self.plugin.napstr_command(argument)
+        return "\n".join(self.plugin.output_lines)
+
+    def load_playlist(self):
+        self.run_command(f'load "{write_csv()}"')
+        return self.plugin.playlist
+
+    def advance_pacer(self):
+        """Pretend the last search was long ago, so pacing lets the next one go."""
+
+        self.plugin._pacer.note_search(now=time.monotonic() - 100_000)
+
+    def wait_for(self, predicate, timeout=5.0):
+        deadline = time.monotonic() + timeout
+
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+
+            time.sleep(0.02)
+
+        return False
+
+
+class LoadingTest(PluginTestCase):
+
+    def test_load_creates_a_playlist(self):
+
+        playlist = self.load_playlist()
+
+        self.assertIsNotNone(playlist)
+        self.assertEqual(len(playlist.entries), 3)
+        self.assertEqual(playlist.title, "Rock")
+        self.assertTrue(os.path.isfile(playlist.file_path()))
+        self.assertEqual(playlist.entries[0]["title"], "Enter Sandman")
+
+    def test_load_without_playlist_reports_a_usable_error(self):
+
+        message = self.run_command("status")
+
+        self.assertIn("No playlist loaded", message)
+
+
+class SearchPacingTest(PluginTestCase):
+    """The regression that matters: never burst, never overlap."""
+
+    def test_only_one_search_is_sent_at_a_time(self):
+
+        self.load_playlist()
+        self.run_command("search all")
+
+        self.assertEqual(len(self.core.search.sent), 1)
+        self.assertEqual(len(self.plugin._search_queue), 2)
+
+    def test_queries_are_focused(self):
+
+        self.load_playlist()
+        self.run_command("search all")
+
+        _token, term = self.core.search.sent[0]
+
+        self.assertEqual(term, "Metallica Enter Sandman")
+
+    def test_the_next_search_waits_for_the_interval(self):
+
+        self.load_playlist()
+        self.run_command("search all")
+
+        # Close the collection window: the second search must still wait
+        SCHEDULER.run_due()
+
+        self.assertEqual(len(self.core.search.sent), 1)
+        self.assertIsNotNone(self.plugin._search_queue_timer)
+
+        self.advance_pacer()
+        SCHEDULER.run_due()
+
+        self.assertEqual(len(self.core.search.sent), 2)
+
+    def test_multi_artist_entries_use_the_primary_artist(self):
+
+        playlist = self.load_playlist()
+
+        self.assertEqual(
+            napstr_playlist.napstr_csv.build_search_query(playlist.entries[1]),
+            "Alice In Chains Rooster")
+
+    def test_a_hundred_entries_cannot_take_two_seconds_each(self):
+
+        self.load_playlist()
+        self.plugin.playlist.entries = self.plugin.playlist.entries * 34  # 102 entries
+
+        for index, entry in enumerate(self.plugin.playlist.entries, start=1):
+            entry["position"] = index
+
+        self.run_command("search all")
+
+        # The batch is queued, but at most one search has left the machine
+        self.assertEqual(len(self.core.search.sent), 1)
+        self.assertEqual(len(self.plugin._search_queue), 101)
+        self.assertGreaterEqual(self.plugin._pacer.interval, 45)
+
+        estimate = self.plugin._pacer.estimate_duration(102)
+
+        self.assertGreater(estimate, 100 * 45)
+
+    def test_searching_is_refused_while_paused(self):
+
+        self.load_playlist()
+        self.plugin._pause_searches("test pause")
+
+        message = self.run_command("search all")
+
+        self.assertIn("paused", message)
+        self.assertEqual(self.core.search.sent, [])
+
+
+class BanHandlingTest(PluginTestCase):
+
+    def test_the_ban_message_stops_the_batch(self):
+
+        self.load_playlist()
+        self.run_command("search all")
+        self.assertEqual(len(self.core.search.sent), 1)
+
+        SCHEDULER.emit("log-message", "%x %X", BAN_MESSAGE, None, "default")
+
+        self.assertTrue(self.plugin._pacer.paused)
+        self.assertEqual(self.plugin._search_queue, [])
+
+        # Even when the interval has passed, nothing restarts on its own
+        self.advance_pacer()
+        self.plugin._pump_search_queue()
+
+        self.assertEqual(len(self.core.search.sent), 1)
+
+        # A notification is raised, so the user is not left guessing
+        titles = [title for title, _message in self.core.notifications.shown]
+
+        self.assertIn("NAPSTR Playlist", titles)
+
+    def test_resume_restarts_the_queue(self):
+
+        self.load_playlist()
+        self.run_command("search all")
+        SCHEDULER.emit("log-message", "%x %X", BAN_MESSAGE, None, "default")
+
+        self.run_command("resume")
+
+        self.assertFalse(self.plugin._pacer.paused)
+
+        self.plugin._queue_searches([2])
+
+        # The search that was already in flight still owns the slot, and a
+        # search cannot be unsent; no new one goes out until its window closes.
+        self.assertEqual(len(self.core.search.sent), 1)
+
+        SCHEDULER.run_due()
+
+        # After an explicit resume the wait has been served, so the queue picks
+        # up immediately instead of idling for another interval.
+        self.assertEqual(len(self.core.search.sent), 2)
+
+    def test_ordinary_log_lines_do_not_pause(self):
+
+        self.load_playlist()
+        self.run_command("search all")
+
+        for message in ("Entry 4 downloaded", "Banned From Heaven.flac", "Rescan complete"):
+            SCHEDULER.emit("log-message", "%x %X", message, None, "default")
+
+        self.assertFalse(self.plugin._pacer.paused)
+
+    def test_a_disconnect_during_a_batch_pauses(self):
+
+        self.load_playlist()
+        self.run_command("search all")
+
+        self.plugin.server_disconnect_notification("")
+
+        self.assertTrue(self.plugin._pacer.paused)
+        self.assertIn("disconnected", self.plugin._pacer.pause_reason)
+
+    def test_a_disconnect_with_nothing_running_is_ignored(self):
+
+        self.load_playlist()
+
+        self.plugin.server_disconnect_notification("")
+
+        self.assertFalse(self.plugin._pacer.paused)
+
+    def test_rate_command_enforces_the_floor(self):
+
+        message = self.run_command("rate 2")
+
+        self.assertIn("Refusing", message)
+        self.assertEqual(self.plugin._pacer.interval, 60)
+        self.run_command("rate 120")
+
+        self.assertEqual(self.plugin._pacer.interval, 120)
+
+    def test_server_supplied_interval_is_adopted(self):
+
+        self.core.search.wishlist_interval = 90
+        self.load_playlist()
+        self.run_command("search all")
+
+        self.assertEqual(self.plugin._pacer.interval, 90)
+
+    def test_a_long_server_interval_is_explained_in_the_log(self):
+        """The 12 minute case: adopted, but never silently."""
+
+        self.core.search.wishlist_interval = 720
+        self.load_playlist()
+        self.run_command("search all")
+
+        self.assertEqual(self.plugin._pacer.interval, 720)
+
+        log = "\n".join(self.plugin.log_lines)
+
+        self.assertIn("wishlist wait period is 12 min", log)
+        self.assertIn("Respect the server interval", log)
+
+    def test_the_server_interval_can_be_declined(self):
+
+        self.core.search.wishlist_interval = 720
+        self.plugin.settings["respect_server_interval"] = False
+        self.plugin.settings["search_interval"] = 60
+        self.plugin._configure_pacer()
+
+        self.load_playlist()
+        self.run_command("search all")
+
+        self.assertEqual(self.plugin._pacer.interval, 60)
+
+    def test_status_names_the_limit_in_force(self):
+
+        self.core.search.wishlist_interval = 720
+        self.plugin.settings["search_interval"] = 45
+        self.plugin._configure_pacer()
+        self.load_playlist()
+
+        status = self.run_command("status")
+
+        self.assertIn("server wait period 12 min", status)
+        self.assertIn("your setting 45 s", status)
+        self.assertIn("hard floor 45 s", status)
+
+    def test_rate_says_so_when_the_server_is_slower(self):
+        """Asking for 45 s and silently getting 12 min is the bug being fixed."""
+
+        self.core.search.wishlist_interval = 720
+        self.plugin._configure_pacer()
+
+        message = self.run_command("rate 45")
+
+        self.assertIn("wishlist wait period (12 min) is slower", message)
+        self.assertEqual(self.plugin._pacer.interval, 720)
+
+    def test_a_rate_warning_backs_off_without_running_away(self):
+
+        self.load_playlist()
+        self.run_command("search all")
+
+        for _ in range(10):
+            self.plugin.on_log_message(None, "Too many searches, slow down", None, None)
+
+        self.assertEqual(self.plugin._pacer.requested_interval,
+                         napstr_pace.MAX_SEARCH_INTERVAL)
+
+        self.assertIn("slowing down to 2 min", "\n".join(self.plugin.log_lines))
+
+    def test_a_rate_warning_does_not_add_to_the_server_wait_period(self):
+
+        self.core.search.wishlist_interval = 720
+        self.plugin.settings["search_interval"] = 60
+        self.plugin._configure_pacer()
+        self.load_playlist()
+        self.run_command("search all")
+
+        self.plugin.on_log_message(None, "Too many searches, slow down", None, None)
+
+        # The requested pace doubles; the twelve minutes that the server asked
+        # for stays twelve minutes rather than becoming twenty-four
+        self.assertEqual(self.plugin._pacer.requested_interval, 120)
+        self.assertEqual(self.plugin._pacer.interval, 720)
+
+    def test_a_setting_change_is_picked_up_mid_batch(self):
+        """Editing search_interval in the pane used to need a plugin reload."""
+
+        self.load_playlist()
+        self.run_command("search all")
+
+        self.plugin.settings["search_interval"] = 120
+        self.plugin._refresh_pace()
+
+        self.assertEqual(self.plugin._pacer.requested_interval, 120)
+
+    def test_picking_up_a_setting_does_not_undo_a_back_off(self):
+
+        self.load_playlist()
+        self.run_command("search all")
+
+        self.plugin.on_log_message(None, "Too many searches, slow down", None, None)
+        backed_off = self.plugin._pacer.requested_interval
+
+        self.plugin._refresh_pace()
+
+        self.assertEqual(self.plugin._pacer.requested_interval, backed_off)
+        self.assertGreater(backed_off, self.plugin.settings["search_interval"])
+
+    def test_bans_and_disconnects_are_not_rate_warnings(self):
+
+        self.load_playlist()
+        self.run_command("search all")
+
+        before = self.plugin._pacer.requested_interval
+        self.plugin.on_log_message(None, BAN_MESSAGE, None, None)
+
+        self.assertTrue(self.plugin._pacer.paused)
+        self.assertEqual(self.plugin._pacer.requested_interval, before)
+
+
+class SearchApiTest(PluginTestCase):
+
+    def test_the_public_search_api_is_never_used(self):
+
+        # FakeSearch.do_search raises if it is reached
+        self.load_playlist()
+
+        self.run_command("search all")
+
+        self.assertEqual(self.core.search.do_search_calls, 0)
+
+    def test_searches_are_released_afterwards(self):
+
+        self.load_playlist()
+        self.run_command("search all")
+
+        token, _term = self.core.search.sent[0]
+        SCHEDULER.run_due()
+
+        self.assertIn(token, self.core.search.removed)
+
+    def test_a_future_private_api_is_supported(self):
+
+        class PrivateSearch:
+            """The naming scheme used after 3.3.x."""
+
+            def __init__(self):
+                self._token = 500
+                self.searches = {}
+                self.sent = []
+                self.allowed = []
+
+            def _add_search(self, token, term, mode, room=None, users=None):
+                import types  # pylint: disable=import-outside-toplevel
+
+                search = types.SimpleNamespace(token=token, term=term, term_transmitted=term)
+                self.searches[token] = search
+
+                return search
+
+            def _send_global_search_request(self, search):
+                self.sent.append((search.token, search.term))
+
+            def add_allowed_token(self, token):
+                self.allowed.append(token)
+
+            def remove_search(self, token):
+                self.searches.pop(token, None)
+
+        private = PrivateSearch()
+        self.core.search = private
+
+        self.load_playlist()
+        self.run_command("search all")
+
+        self.assertEqual(len(private.sent), 1)
+        self.assertEqual(private.sent[0][0], 501)
+
+    def test_an_unknown_api_stops_instead_of_flooding(self):
+
+        class UnknownSearch:
+            pass
+
+        self.core.search = UnknownSearch()
+
+        self.load_playlist()
+        self.run_command("search all")
+
+        self.assertTrue(self.plugin._pacer.paused)
+        self.assertEqual(self.plugin._search_queue, [])
+        self.assertIn("no usable search API", self.plugin._pacer.pause_reason)
+
+
+class DownloadTest(PluginTestCase):
+
+    def test_pick_enqueues_the_chosen_candidate(self):
+
+        playlist = self.load_playlist()
+        entry = playlist.entries[0]
+        entry["candidates"] = [{
+            "username": "user1", "path": "Music\\Metallica\\Enter Sandman.flac",
+            "size": 1000, "bitrate": 1005, "length": 331, "score": 0.95
+        }]
+
+        self.run_command("pick 1 1")
+
+        self.assertEqual(len(self.core.downloads.enqueued), 1)
+        queued = self.core.downloads.enqueued[0]
+
+        self.assertEqual(queued["username"], "user1")
+        self.assertEqual(queued["path"], "Music\\Metallica\\Enter Sandman.flac")
+        self.assertIn(playlist.id, queued["folder_path"])
+        self.assertEqual(entry["status"], "queued")
+
+    def test_download_finished_triggers_hashing(self):
+
+        playlist = self.load_playlist()
+        entry = playlist.entries[0]
+        entry["chosen"] = {"username": "user1", "path": "Music\\Song.flac"}
+
+        content = b"pretend audio"
+        real_path = os.path.join(DATA_FOLDER, "download.flac")
+
+        with open(real_path, "wb") as file_handle:
+            file_handle.write(content)
+
+        self.plugin.download_finished_notification("user1", "Music\\Song.flac", real_path)
+
+        self.assertTrue(self.wait_for(lambda: entry["file_id"]))
+        self.assertEqual(entry["file_id"], hashlib.sha256(content).hexdigest())
+        self.assertEqual(entry["status"], "hashed")
+
+    def test_setpath_hashes_the_file(self):
+
+        playlist = self.load_playlist()
+        content = b"another file"
+        path = os.path.join(DATA_FOLDER, "manual.mp3")
+
+        with open(path, "wb") as file_handle:
+            file_handle.write(content)
+
+        self.run_command(f'setpath 1 "{path}"')
+
+        self.assertTrue(self.wait_for(lambda: playlist.entries[0]["file_id"]))
+        self.assertEqual(playlist.entries[0]["file_id"], hashlib.sha256(content).hexdigest())
+
+
+class PublishTest(PluginTestCase):
+
+    def setUp(self):
+
+        super().setUp()
+
+        self.published = []
+
+        def fake_publish(_pool, event, timeout=None):
+            self.published.append(event)
+
+            return [napstr_relay.RelayResult("wss://relay.test", accepted=True, message="ok")]
+
+        # No network in tests: the pool is stubbed at the class level
+        self._real_publish = napstr_relay.RelayPool.publish
+        napstr_relay.RelayPool.publish = fake_publish
+        self.addCleanup(self._restore_publish)
+
+    def _restore_publish(self):
+        napstr_relay.RelayPool.publish = self._real_publish
+
+    def test_publish_refuses_an_incomplete_playlist(self):
+
+        playlist = self.load_playlist()
+        entry = playlist.entries[0]
+        entry["file_id"] = "48e5979efa6a56dc3cab293b954ae84e36f464b936bd8c534838189abcc93c68"
+
+        message = self.run_command("publish")
+
+        self.assertIn("Refusing to publish", message)
+        self.assertIn("member slot", message)
+        self.assertEqual(self.published, [])
+
+    def test_publish_signs_and_sends_a_valid_event(self):
+
+        playlist = self.load_playlist()
+
+        for index, entry in enumerate(playlist.entries):
+            entry["file_id"] = f"{index + 1:064x}"
+
+        self.run_command("publish")
+
+        self.assertTrue(self.wait_for(lambda: self.published))
+
+        event = self.published[0]
+
+        self.assertEqual(event["kind"], 30425)
+        self.assertEqual(napstr_event.validate_playlist_event(event), [])
+        self.assertEqual(
+            [tag[1] for tag in event["tags"] if tag[0] == "x"],
+            [entry["file_id"] for entry in playlist.entries])
+
+        self.assertTrue(self.wait_for(lambda: playlist.published))
+        self.assertEqual(playlist.published[0]["event_id"], event["id"])
+
+    def test_publish_needs_a_key(self):
+
+        self.plugin.settings["nostr_key"] = ""
+        self.load_playlist()
+
+        message = self.run_command("publish")
+
+        self.assertIn("No Nostr private key", message)
+        self.assertEqual(self.published, [])
+
+    def test_publish_refuses_a_partial_playlist_when_required(self):
+
+        playlist = self.load_playlist()
+
+        for entry in playlist.entries:
+            entry["file_id"] = "11" * 32
+
+        message = self.run_command("publish")
+
+        # Three entries, one file ID: duplicate members are dropped by the NIP
+        self.assertIn("Refusing to publish", message)
+        self.assertEqual(self.published, [])
+
+
+class FilterTest(PluginTestCase):
+    """Excluded formats and the min/max limits, end to end."""
+
+    def test_flac_is_excluded_by_default(self):
+
+        self.assertEqual(self.plugin._excluded_extensions(), ["flac"])
+        self.assertIn("excluding flac", self.plugin._filter_summary())
+
+        options = self.plugin.scoring_options()
+        score, reasons = napstr_playlist.napstr_match.score_candidate(
+            {"title": "Enter Sandman", "artist": "Metallica"},
+            "Music\\Metallica\\Enter Sandman.flac", options=options)
+
+        self.assertEqual(score, 0.0)
+        self.assertEqual(reasons, ["excluded format: flac"])
+
+    def test_filters_reach_the_summary(self):
+
+        self.plugin.settings["min_bitrate"] = 192
+        self.plugin.settings["max_bitrate"] = 320
+        self.plugin.settings["min_size_mb"] = 2
+        self.plugin.settings["max_size_mb"] = 25
+        self.plugin.settings["excluded_formats"] = ["flac", ".wav"]
+
+        summary = self.plugin._filter_summary()
+
+        for expected in ("excluding flac, wav", "min 192 kbps", "max 320 kbps",
+                         "min 2 MB", "max 25 MB"):
+            self.assertIn(expected, summary)
+
+        options = self.plugin.scoring_options()
+
+        self.assertEqual(options.excluded_extensions, ("flac", "wav"))
+        self.assertEqual(options.max_bitrate, 320)
+        self.assertEqual(options.min_size_bytes, 2 * 1024 * 1024)
+
+    def test_a_flac_pick_is_never_downloaded(self):
+
+        playlist = self.load_playlist()
+        entry = playlist.entries[0]
+        entry["candidates"] = [{
+            "username": "user1", "path": "Music\\Metallica\\Enter Sandman.flac",
+            "size": 30 * 1024 * 1024, "bitrate": 1005, "length": 331, "score": 0.99
+        }]
+        entry["query"] = "Metallica Enter Sandman"
+
+        self.plugin._finish_search_for_position(1)
+
+        self.assertEqual(self.core.downloads.enqueued, [])
+        self.assertEqual(entry["status"], "unavailable")
+        self.assertIn("rejected by the filters", entry["notes"])
+        self.assertIn("excluded format: flac", "\n".join(self.plugin.log_lines))
+
+    def test_a_filtered_candidate_leaves_the_good_one_usable(self):
+
+        playlist = self.load_playlist()
+        entry = playlist.entries[0]
+        entry["candidates"] = [
+            {"username": "lossless", "path": "Music\\Metallica\\Enter Sandman.flac",
+             "size": 30 * 1024 * 1024, "bitrate": 1005, "length": 331},
+            {"username": "lossy", "path": "Music\\Metallica\\Enter Sandman.mp3",
+             "size": 8 * 1024 * 1024, "bitrate": 320, "length": 331}
+        ]
+
+        self.plugin._finish_search_for_position(1)
+
+        self.assertEqual(len(self.core.downloads.enqueued), 1)
+        self.assertEqual(self.core.downloads.enqueued[0]["username"], "lossy")
+        self.assertEqual(entry["status"], "queued")
+
+        # The rejected one is still visible in /napstr options, with its reason
+        self.assertEqual(len(entry["candidates"]), 2)
+        self.assertEqual(entry["candidates"][1]["score"], 0.0)
+
+
+class ResetTest(PluginTestCase):
+
+    def test_reset_clears_decisions_and_keeps_file_ids(self):
+
+        playlist = self.load_playlist()
+        entry = playlist.entries[0]
+        entry["file_id"] = "ab" * 32
+        entry["local_path"] = "C:\\Music\\song.mp3"
+        entry["candidates"] = [{"username": "u", "path": "p", "score": 0.9}]
+        entry["chosen"] = {"username": "u", "path": "p"}
+
+        self.run_command("reset all")
+
+        self.assertTrue(entry["file_id"])
+        self.assertEqual(entry["candidates"], [])
+        self.assertIsNone(entry["chosen"])
+        self.assertEqual(entry["status"], "new")
+
+    def test_forget_also_drops_file_ids(self):
+
+        playlist = self.load_playlist()
+        entry = playlist.entries[0]
+        entry["file_id"] = "ab" * 32
+        entry["local_path"] = "C:\\Music\\song.mp3"
+
+        self.run_command("forget all")
+
+        self.assertEqual(entry["file_id"], "")
+        self.assertEqual(entry["local_path"], "")
+        self.assertEqual(entry["status"], "new")
+
+    def test_reset_needs_a_target(self):
+
+        self.load_playlist()
+
+        self.assertIn("Usage: /napstr reset", self.run_command("reset"))
+
+    def test_the_reset_survives_a_reload(self):
+
+        playlist = self.load_playlist()
+        playlist.entries[0]["file_id"] = "cd" * 32
+        playlist.entries[0]["candidates"] = [{"username": "u", "path": "p"}]
+
+        self.run_command("reset all")
+
+        import napstr_state  # pylint: disable=import-outside-toplevel
+
+        reloaded = napstr_state.load_playlist(CONFIG.data_folder_path, playlist.id)
+
+        self.assertEqual(reloaded.entries[0]["file_id"], "cd" * 32)
+        self.assertEqual(reloaded.entries[0]["candidates"], [])
+
+
+class SkipAndStatusTest(PluginTestCase):
+
+    def test_skip_and_unskip(self):
+
+        playlist = self.load_playlist()
+
+        self.run_command("skip 2")
+
+        self.assertEqual(playlist.entries[1]["status"], "skipped")
+
+        self.run_command("unskip 2")
+
+        self.assertEqual(playlist.entries[1]["status"], "new")
+
+    def test_status_reports_the_pace(self):
+
+        self.load_playlist()
+        self.run_command("status")
+
+        text = "\n".join(self.plugin.output_lines)
+
+        self.assertIn("Search pace", text)
+        self.assertIn("one search every", text)
+        self.assertIn("Filters", text)
+        self.assertIn("excluding flac", text)
+
+    def test_help_lists_the_new_commands(self):
+
+        self.run_command("help")
+
+        text = "\n".join(self.plugin.output_lines)
+
+        self.assertIn("/napstr resume | rate <seconds>", text)
+
+
+if __name__ == "__main__":
+    unittest.main()

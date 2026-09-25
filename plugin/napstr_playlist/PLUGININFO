@@ -1,0 +1,5 @@
+Version = "1.0.0"
+Authors = ["StateAntigen"]
+Name = _("NAPSTR Playlist")
+Description = _("Import Spotify playlists exported with Exportify, match every track on Soulseek, SHA-256 the files and publish them as a NAPSTR playlist event (Nostr kind 30425).")
+License = "0BSD"
