@@ -1389,6 +1389,33 @@ class SkipAndStatusTest(PluginTestCase):
 
         self.assertIn("/napstr resume | rate <seconds>", text)
 
+    def test_status_names_the_identity_that_publishes(self):
+
+        self.load_playlist()
+        self.run_command("status")
+
+        text = "\n".join(self.plugin.output_lines)
+
+        # The coordinate is (author, playlist id), so the author half has to be
+        # visible: a key that is not the one the rest of your setup uses
+        # otherwise only shows up in another app, as somebody else's playlist.
+        import napstr_crypto  # pylint: disable=import-outside-toplevel
+
+        expected = napstr_crypto.encode_npub(napstr_crypto.get_public_key(
+            napstr_crypto.decode_secret_key(SECRET_KEY)))
+
+        self.assertIn(f"Published as: {expected}", text)
+        self.assertTrue(expected.startswith("npub1"))
+
+    def test_status_says_when_no_key_is_set(self):
+
+        self.load_playlist()
+        self.plugin.settings["nostr_key"] = ""
+
+        output = self.run_command("status")
+
+        self.assertIn("Published as: No Nostr private key set", output)
+
 
 if __name__ == "__main__":
     unittest.main()

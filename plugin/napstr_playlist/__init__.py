@@ -444,6 +444,31 @@ class Plugin(BasePlugin):
         except Exception as error:  # pylint: disable=broad-except
             return None, f"Invalid Nostr private key: {error}"
 
+    def _identity_npub(self):
+        """Return ``(npub, error)`` for the configured key.
+
+        A playlist's coordinate is (author, playlist id), so this is the half
+        that decides whether the Napstr app sees a published playlist as its
+        own. Printing it is the only way to notice a key that is not the one
+        the rest of your setup uses - which is a mistake that is otherwise
+        invisible until the app shows your playlist as somebody else's.
+        """
+
+        secret_key, error = self._credentials()
+
+        if secret_key is None:
+            return None, error
+
+        import napstr_crypto  # pylint: disable=import-outside-toplevel
+
+        try:
+            return napstr_crypto.encode_npub(napstr_crypto.get_public_key(secret_key)), None
+
+        except Exception as derive_error:  # pylint: disable=broad-except
+            # Never report this as "no key set": the key is there, and saying
+            # otherwise sends people looking in the wrong place.
+            return None, f"key set but unusable: {derive_error}"
+
     def _relay_urls(self):
 
         relays = []
@@ -801,6 +826,8 @@ class Plugin(BasePlugin):
         counts = ", ".join(
             f"{status}: {count}" for status, count in summary["counts"].items() if count)
 
+        identity, identity_error = self._identity_npub()
+
         self.output(
             f"Playlist: {self.playlist.title}\n"
             f"\tCoordinate: {self.playlist.id}\n"
@@ -808,6 +835,7 @@ class Plugin(BasePlugin):
             f"\tEntries: {summary['total']}\n"
             f"\tWith file ID: {summary['with_file_id']}\n"
             f"\tStatuses: {counts or 'none'}\n"
+            f"\tPublished as: {identity or identity_error}\n"
             f"\tAuthor tags: {', '.join(self.playlist.tags) or '(none - no word beyond the marker)'}\n"
             f"\tSearch pace: {self._pacer.describe_detail()}\n"
             f"\tFilters: {self._filter_summary()}\n"
@@ -2522,7 +2550,8 @@ class Plugin(BasePlugin):
                 "or repeat one; the event only carries the remaining members.")
 
         self.output(
-            f"Publishing '{title}' with {len(tracks)} member(s) to {len(relays)} relay(s)...")
+            f"Publishing '{title}' with {len(tracks)} member(s) as "
+            f"{self._identity_npub()[0] or 'the configured key'} to {len(relays)} relay(s)...")
 
         thread = threading.Thread(target=self._publish_worker, args=(event, relays),
                                   name="napstr-publish", daemon=True)
@@ -2605,7 +2634,9 @@ class Plugin(BasePlugin):
             return False
 
         self._publishing = True
-        self.output(f"Retracting playlist {self.playlist.id}...")
+        self.output(
+            f"Retracting playlist {self.playlist.id} as "
+            f"{self._identity_npub()[0] or 'the configured key'}...")
 
         thread = threading.Thread(target=self._unpublish_worker, args=(event, relays),
                                   name="napstr-unpublish", daemon=True)

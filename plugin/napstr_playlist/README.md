@@ -47,6 +47,14 @@ them, and `/napstr include <entry>` is the only thing that puts one back.
 `skip`/`unskip` is the softer pair - a paused entry that still counts as
 missing.
 
+**A playlist is owned by (author, id).** `/napstr status` and `/napstr publish`
+name the npub the plugin publishes as, because a key that is not the one the
+rest of your setup uses is otherwise invisible: a Napstr app treats only
+playlists authored by its own identity as its own, even when it can read them.
+If you want the app to own what this plugin publishes, use one key for both -
+and `/napstr unpublish` **before** you change it, because a withdrawal is signed
+with the key that published the event.
+
 **A dead source is replaced automatically.** When a peer refuses a download
 (`File not shared.`, banned, logged off, connection lost) the plugin records
 that source as tried and queues the next best candidate above your

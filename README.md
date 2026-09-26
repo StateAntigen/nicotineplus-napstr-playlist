@@ -26,7 +26,7 @@ Exportify CSV  ->  per-entry Soulseek search  ->  scored candidates
 | `plugin/napstr_playlist/napstr_relay.py` | RFC 6455 WebSocket client and Nostr relay pool |
 | `plugin/napstr_playlist/napstr_event.py` | Kind 30425 event build, sign and validate |
 | `plugin/napstr_playlist/napstr_dialog.py` | Optional GTK4 review window |
-| `tests/` | 274 unit tests, runnable with any Python 3.8+ interpreter |
+| `tests/` | 276 unit tests, runnable with any Python 3.8+ interpreter |
 | `tools/selfcheck.py` | Static checks (compile, undefined attributes, callback ownership) |
 | `tools/reset_playlist.py` | Clears a playlist's decisions, re-queues files that no longer pass the filters |
 | `tools/deploy.ps1` | Installs/uninstalls the plugin into `%APPDATA%\nicotine\plugins` |
@@ -344,6 +344,44 @@ Files in the staging folder are also matched by content, not by name, so a peer
 that shares a file with an odd name (leading `.~`, for example - that is the
 uploader's own naming, not a half-finished download, which Nicotine+ keeps in
 its own `incomplete` folder) is still recognised as a member.
+
+## Which identity publishes
+
+A playlist's coordinate is (author, playlist id), so the author half decides who
+owns it. The plugin publishes as the key in its own settings, and both
+`/napstr status` and `/napstr publish` name it:
+
+```
+/napstr status
+	Published as: npub1...
+```
+
+If you also use the Napstr desktop app, give both the **same** key. The app
+treats "my playlists" as the ones authored by its own identity, so a playlist
+published by a different key is still valid and still found by the
+`napstr-playlist` marker, but the app shows it as somebody else's: it cannot
+rename, reorder, revise or withdraw it, and its own reconciliation query
+(`authors: [self]`) never sees it.
+
+The app keeps its key in the operating-system keyring - not in its database,
+not in a file you can read - and offers no export. On Windows it is a generic
+credential with the target `nostr-identity.social.napstr.desktop` (service
+`social.napstr.desktop`, account `nostr-identity`), whose blob is the nsec
+encoded UTF-16LE. `NAPSTR_NSEC` overrides it entirely if you ever set that
+either in the shell or for the app's shortcut.
+
+To move the plugin onto the app's identity, in this order:
+
+1. `/napstr unpublish` **before** changing the key. A withdrawal is signed with
+   the key that published the event, so once the key changes the old revision
+   can no longer be retracted and stays on the relays permanently.
+2. Put the app's nsec in the plugin's `nostr_key` setting.
+3. `/napstr publish` again. The same playlist id under a new author is a new
+   coordinate - this one the app will own.
+
+Going the other way is possible (`NAPSTR_NSEC` makes the app adopt the plugin's
+key) but is usually the wrong direction: the app's identity carries your
+profile, catalogue and anything else you published from it.
 
 ## What gets published
 
