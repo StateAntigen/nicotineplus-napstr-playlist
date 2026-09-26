@@ -52,10 +52,12 @@ MAX_CANDIDATES_PER_ENTRY = 200
 
 FORMAT_CHOICES = ("any", "flac", "mp3", "ogg", "opus", "m4a", "wav")
 
-# Statuses that never need another search
+# Statuses that never need another search. An excluded entry is in here too:
+# taking a track out of the playlist means it is not searched again either.
 INACTIVE_STATUSES = (
     napstr_state.STATUS_HASHED, napstr_state.STATUS_SKIPPED, napstr_state.STATUS_DOWNLOADED,
-    napstr_state.STATUS_DOWNLOADING, napstr_state.STATUS_QUEUED
+    napstr_state.STATUS_DOWNLOADING, napstr_state.STATUS_QUEUED,
+    napstr_state.STATUS_EXCLUDED
 )
 
 # Transfer statuses that mean this download is not going to happen. Verified
@@ -217,7 +219,8 @@ class Plugin(BasePlugin):
                 "type": "list string"
             },
             "require_full": {
-                "description": "Refuse to publish unless every entry has a file ID (turn off to publish partial playlists)",
+                "description": ("Refuse to publish unless every entry has a file ID, ignoring "
+                                "entries you excluded (turn off to publish partial playlists)"),
                 "group": "Publishing",
                 "type": "bool"
             },
@@ -464,10 +467,14 @@ class Plugin(BasePlugin):
     @staticmethod
     def _status_label(entry):
 
-        if entry.get("file_id"):
+        status = str(entry.get("status", napstr_state.STATUS_NEW))
+
+        # An excluded entry can still have a file on disk (your own copy), but
+        # it is out of the playlist, and the label is what you scan for.
+        if entry.get("file_id") and status != napstr_state.STATUS_EXCLUDED:
             return f"hashed:{entry['file_id'][:10]}"
 
-        return str(entry.get("status", napstr_state.STATUS_NEW))
+        return status
 
     @staticmethod
     def _entry_label(entry):
@@ -499,6 +506,8 @@ class Plugin(BasePlugin):
             "auto": self._action_auto,
             "skip": self._action_skip,
             "unskip": self._action_unskip,
+            "exclude": self._action_exclude,
+            "include": self._action_include,
             "setpath": self._action_setpath,
             "scan": self._action_scan,
             "orphans": self._action_orphans,
@@ -541,6 +550,8 @@ class Plugin(BasePlugin):
             "\t/napstr pick <n> <rank>                     download that candidate\n"
             "\t/napstr auto <n|all>                        search and auto-pick\n"
             "\t/napstr skip <n> | unskip <n>               mark an entry\n"
+            "\t/napstr exclude <n|all|missing> [reason]   drop entries for good\n"
+            "\t/napstr include <n|all|missing>            put excluded entries back\n"
             "\t/napstr setpath <n> <file>                  set the local file by hand\n"
             "\t/napstr scan                                find files you already have\n"
             "\t/napstr orphans [delete]                    list (or delete) stray files\n"
@@ -875,11 +886,15 @@ class Plugin(BasePlugin):
     # searching
     # ------------------------------------------------------------------
 
-    def _resolve_positions(self, rest, default=""):
+    def _resolve_positions(self, rest, default="", skip_excluded=False):
         """Turn a command argument into a list of entry positions.
 
         There is deliberately no default target: an action without an
         argument must never fan out over the whole playlist by accident.
+
+        With ``skip_excluded``, 'all' and 'missing' leave deliberately
+        excluded entries out; a position the user typed is always honoured,
+        because naming one entry is as deliberate as excluding it.
         """
 
         argument = (rest or "").strip().lower() or (default or "")
@@ -888,7 +903,10 @@ class Plugin(BasePlugin):
             return []
 
         if argument in {"all", "*"}:
-            return [entry["position"] for entry in self.playlist.entries]
+            return [
+                entry["position"] for entry in self.playlist.entries
+                if not (skip_excluded and entry.get("status") == napstr_state.STATUS_EXCLUDED)
+            ]
 
         if argument == "missing":
             return [
@@ -912,7 +930,7 @@ class Plugin(BasePlugin):
         if not self._require_playlist():
             return False
 
-        positions = self._resolve_positions(rest)
+        positions = self._resolve_positions(rest, skip_excluded=True)
 
         if not positions:
             self.output("Usage: /napstr search <entry number|all|missing>")
@@ -925,7 +943,7 @@ class Plugin(BasePlugin):
         if not self._require_playlist():
             return False
 
-        positions = self._resolve_positions(rest)
+        positions = self._resolve_positions(rest, skip_excluded=True)
 
         if not positions:
             self.output("Usage: /napstr auto <entry number|all|missing>")
@@ -1395,7 +1413,10 @@ class Plugin(BasePlugin):
 
             else:
                 self.playlist.set_status(entry, napstr_state.STATUS_UNAVAILABLE, "no results")
-                self._report(f"Entry {position}: no results for '{entry.get('query')}'.", notify=True)
+                self._report(
+                    f"Entry {position}: no results for '{entry.get('query')}'. "
+                    f"/napstr exclude {position} drops it from the playlist, "
+                    f"/napstr setpath {position} <file> uses your own copy.", notify=True)
 
             self._save_playlist()
             return
@@ -1693,7 +1714,8 @@ class Plugin(BasePlugin):
         self._report(
             f"Entry {position}: {len(tried)} source(s) failed, the last one said "
             f"\"{reason}\". Use /napstr options {position} to pick another, "
-            f"or /napstr search {position} to look again.", notify=True)
+            f"/napstr setpath {position} <file> for a copy you have, or "
+            f"/napstr exclude {position} to drop it from the playlist.", notify=True)
         self.playlist.save()
 
     def _next_untried_candidate(self, entry):
@@ -1779,12 +1801,104 @@ class Plugin(BasePlugin):
     def _action_unskip(self, rest):
         return self._set_status_for_positions(rest, napstr_state.STATUS_NEW, "", "unskip")
 
-    def _set_status_for_positions(self, rest, status, note, verb):
+    def _action_exclude(self, rest):
+        """Take tracks out of the playlist for good, on the user's say-so.
+
+        Some tracks are simply not on Soulseek. Searching for them again on
+        every /napstr auto missing wastes the one resource this plugin spends
+        carefully, and publishing stalls on them, so they can be dropped
+        deliberately - and only deliberately.
+        """
+
+        if not self._require_playlist():
+            return False
+
+        parts = (rest or "").strip().split(maxsplit=1)
+        reason = parts[1].strip() if len(parts) > 1 else ""
+        positions = self._resolve_positions(parts[0].lower() if parts else "")
+
+        if not positions:
+            self.output("Usage: /napstr exclude <entry number|all|missing> [reason]")
+            return False
+
+        note = f"excluded by hand: {reason}" if reason else "excluded by hand"
+        excluded = 0
+
+        for position in positions:
+            entry = self.playlist.entry(position)
+
+            if entry is None:
+                continue
+
+            self.playlist.set_status(entry, napstr_state.STATUS_EXCLUDED, note)
+            excluded += 1
+
+        self._save_playlist()
+        self.output(
+            f"Excluded {excluded} entr(y/ies): not searched again, not counted by "
+            "'require_full', and not published.")
+        self.output(
+            "Use /napstr include <entry> to put one back, or /napstr setpath <entry> <file> "
+            "to add a copy you already have instead.")
+
+        return True
+
+    def _action_include(self, rest):
+        """Put excluded entries back into the playlist."""
 
         if not self._require_playlist():
             return False
 
         positions = self._resolve_positions(rest)
+
+        if not positions:
+            self.output("Usage: /napstr include <entry number|all|missing>")
+            return False
+
+        restored = 0
+        not_excluded = []
+
+        for position in positions:
+            entry = self.playlist.entry(position)
+
+            if entry is None:
+                continue
+
+            if entry.get("status") != napstr_state.STATUS_EXCLUDED:
+                not_excluded.append(position)
+                continue
+
+            # Say what is true now, not what was true before the exclusion: an
+            # entry that still has its file on disk is hashed, not new.
+            path = str(entry.get("local_path") or "")
+
+            if entry.get("file_id") and path and os.path.isfile(path):
+                self.playlist.set_status(entry, napstr_state.STATUS_HASHED,
+                                         "included again, file still on disk")
+
+            else:
+                self.playlist.set_status(entry, napstr_state.STATUS_NEW,
+                                         "included again by hand")
+
+            restored += 1
+
+        self._save_playlist()
+        self.output(f"Put {restored} entr(y/ies) back in the playlist.")
+
+        if not_excluded:
+            self.output(
+                "Not excluded, so left as they are: "
+                + ", ".join(str(position) for position in not_excluded[:10])
+                + ("..." if len(not_excluded) > 10 else ""))
+
+        return True
+
+    def _set_status_for_positions(self, rest, status, note, verb):
+
+        if not self._require_playlist():
+            return False
+
+        positions = self._resolve_positions(rest, skip_excluded=True)
 
         if not positions:
             self.output(f"Usage: /napstr {verb} <entry number>")
@@ -1829,6 +1943,20 @@ class Plugin(BasePlugin):
 
         self._save_playlist()
         self.output(f"Cleared the search state of {changed} entr(y/ies){kept}.")
+
+        # An exclusion is a decision the user made on purpose, so a blanket
+        # reset does not undo it - but say so, or it looks like reset failed.
+        protected = [
+            position for position in positions
+            if (self.playlist.entry(position) or {}).get("status") == napstr_state.STATUS_EXCLUDED
+        ]
+
+        if protected:
+            self.output(
+                "Left excluded (a reset does not undo that): "
+                + ", ".join(str(position) for position in protected[:10])
+                + ("..." if len(protected) > 10 else "")
+                + " Use /napstr include <entry> to put one back.")
 
         if not drop_files:
             # A reset keeps the file, so /napstr auto will not fetch a replacement
@@ -1950,7 +2078,8 @@ class Plugin(BasePlugin):
 
         unresolved = [
             entry["position"] for entry in self.playlist.entries
-            if not entry.get("file_id") and entry.get("status") != napstr_state.STATUS_SKIPPED
+            if not entry.get("file_id")
+            and entry.get("status") not in (napstr_state.STATUS_SKIPPED, napstr_state.STATUS_EXCLUDED)
         ]
 
         if not unresolved:
@@ -2128,7 +2257,7 @@ class Plugin(BasePlugin):
             return False
 
         argument = rest.strip().lower()
-        positions = self._resolve_positions(rest)
+        positions = self._resolve_positions(rest, skip_excluded=True)
 
         # 'all' re-hashes everything, 'missing' and a single entry only fill in
         # entries that have no file ID yet.
@@ -2342,9 +2471,20 @@ class Plugin(BasePlugin):
                 f"Refusing to publish: 'require_full' is enabled and {len(skipped)} member "
                 f"slot(s) cannot be included - {details}{remainder}.")
             self.output(
-                "Resolve them (/napstr auto missing, /napstr scan, /napstr setpath), or turn "
+                "Resolve them (/napstr auto missing, /napstr scan, /napstr setpath), or drop "
+                "the ones that are not on Soulseek with /napstr exclude <entry>, or turn "
                 "'require_full' off to publish only the resolved members.")
             return False
+
+        excluded = self.playlist.excluded_entries()
+
+        if excluded:
+            self.output(
+                f"{len(excluded)} entr(y/ies) are excluded on purpose and stay out of this "
+                "event: "
+                + ", ".join(str(entry["position"]) for entry in excluded[:10])
+                + ("..." if len(excluded) > 10 else "")
+                + " (/napstr include <entry> brings one back.)")
 
         try:
             event = napstr_event.build_playlist_event(

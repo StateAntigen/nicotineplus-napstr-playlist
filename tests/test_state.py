@@ -397,6 +397,57 @@ class ResetEntriesTest(unittest.TestCase):
             self.assertTrue(entry["file_id"])
 
 
+class ExcludedEntriesTest(unittest.TestCase):
+    """An entry the user removed on purpose is not a hole in the playlist."""
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp()
+        self.playlist = napstr_state.PlaylistState(
+            self.folder, title="Rock", entries=ENTRIES, tags=["rock"])
+
+        for index, entry in enumerate(self.playlist.entries, start=1):
+            entry["file_id"] = f"{index:064x}"
+
+        self.playlist.entries[1]["status"] = napstr_state.STATUS_EXCLUDED
+        self.playlist.entries[1]["file_id"] = ""
+
+    def test_an_excluded_entry_is_not_published_or_reported_missing(self):
+
+        tracks, skipped = self.playlist.publishable_tracks()
+
+        self.assertEqual(len(tracks), 2)
+        self.assertEqual(skipped, [])
+        self.assertEqual([track["position"] for track in tracks], [1, 2])
+
+    def test_excluded_entries_are_listed_as_such(self):
+
+        self.assertEqual(
+            [entry["position"] for entry in self.playlist.excluded_entries()], [2])
+        self.assertEqual(self.playlist.summary()["counts"][napstr_state.STATUS_EXCLUDED], 1)
+
+    def test_a_reset_leaves_an_excluded_entry_alone(self):
+
+        self.playlist.entries[0]["candidates"] = [{"username": "u", "path": "p"}]
+
+        changed = napstr_state.reset_entries(self.playlist)
+
+        self.assertEqual(changed, 2)
+        self.assertEqual(self.playlist.entries[1]["status"], napstr_state.STATUS_EXCLUDED)
+        self.assertEqual(self.playlist.entries[0]["status"], napstr_state.STATUS_NEW)
+
+    def test_protect_excluded_false_is_how_it_comes_back(self):
+
+        napstr_state.reset_entries(self.playlist, protect_excluded=False)
+
+        for entry in self.playlist.entries:
+            self.assertEqual(entry["status"], napstr_state.STATUS_NEW)
+
+    def test_an_excluded_entry_is_a_known_status(self):
+
+        self.assertIn(napstr_state.STATUS_EXCLUDED, napstr_state.STATUSES)
+        self.assertIn(napstr_state.STATUS_EXCLUDED, napstr_state.FINAL_STATUSES)
+
+
 class FindOrphansTest(unittest.TestCase):
     """find_orphans, which is only ever pointed at one playlist's folder."""
 

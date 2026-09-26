@@ -1165,6 +1165,196 @@ class ResetTest(PluginTestCase):
         self.assertEqual(reloaded.entries[0]["candidates"], [])
 
 
+class ExclusionTest(PluginTestCase):
+    """Tracks that are not on Soulseek at all, and copies you supply yourself.
+
+    Some entries cannot be had from other people - a pressing nobody shares, a
+    bootleg. Searching for them again on every batch spends the one resource
+    this plugin spends carefully, and they stall a require_full publish, so the
+    user can drop them deliberately or point the entry at their own file.
+    """
+
+    def setUp(self):
+
+        super().setUp()
+
+        self.playlist = self.load_playlist()
+        self.entry = self.playlist.entries[0]
+
+        self.published = []
+
+        def fake_publish(_pool, event, timeout=None):
+            self.published.append(event)
+
+            return [napstr_relay.RelayResult("wss://relay.test", accepted=True, message="ok")]
+
+        self._real_publish = napstr_relay.RelayPool.publish
+        napstr_relay.RelayPool.publish = fake_publish
+        self.addCleanup(self._restore_publish)
+
+    def _restore_publish(self):
+        napstr_relay.RelayPool.publish = self._real_publish
+
+    def test_excluding_records_the_reason(self):
+
+        output = self.run_command("exclude 1 not shared by anyone")
+
+        self.assertEqual(self.entry["status"], "excluded")
+        self.assertIn("not shared by anyone", self.entry["notes"])
+        self.assertIn("Excluded 1", output)
+
+    def test_exclude_needs_a_target(self):
+
+        self.assertIn("Usage: /napstr exclude", self.run_command("exclude"))
+
+    def test_an_excluded_entry_is_not_a_gap_for_require_full(self):
+
+        for index, entry in enumerate(self.playlist.entries):
+            entry["file_id"] = f"{index + 1:064x}"
+
+        self.run_command("exclude 2")
+        self.run_command("publish")
+
+        self.assertTrue(self.wait_for(lambda: self.published))
+
+        event = self.published[0]
+
+        self.assertEqual(len([tag for tag in event["tags"] if tag[0] == "x"]), 2)
+        self.assertEqual(napstr_event.validate_playlist_event(event), [])
+
+    def test_publish_reports_what_it_was_asked_to_leave_out(self):
+
+        for index, entry in enumerate(self.playlist.entries):
+            entry["file_id"] = f"{index + 1:064x}"
+
+        self.run_command("exclude 2")
+        self.run_command("publish")
+
+        self.assertIn("excluded on purpose", "\n".join(self.plugin.output_lines))
+
+    def test_an_excluded_entry_is_not_searched_again(self):
+
+        self.run_command("exclude 2")
+        self.run_command("search all")
+
+        # One search is in flight and the rest wait; entry 2 is in neither
+        sent_terms = [term for _token, term in self.core.search.sent]
+
+        self.assertEqual(sent_terms, ["Metallica Enter Sandman"])
+        self.assertEqual(self.plugin._search_queue, [3])
+
+    def test_a_file_you_supply_yourself_fills_an_impossible_entry(self):
+
+        self.playlist.set_status(self.entry, "unavailable", "no results")
+
+        path = write_audio_file()
+        self.run_command(f'setpath 1 "{path}"')
+
+        self.assertTrue(self.wait_for(lambda: self.entry["file_id"]))
+
+        tracks, skipped = self.playlist.publishable_tracks()
+
+        self.assertEqual([track["position"] for track in tracks], [1])
+        self.assertEqual([position for position, _reason in skipped], [2, 3])
+
+    def test_a_reset_leaves_an_excluded_entry_alone(self):
+
+        self.entry["candidates"] = [{"username": "u", "path": "p", "score": 0.9}]
+        self.run_command("exclude 1")
+
+        output = self.run_command("reset all")
+
+        self.assertEqual(self.entry["status"], "excluded")
+        self.assertIn("Left excluded", output)
+        self.assertIn("/napstr include", output)
+
+    def test_forget_also_leaves_an_excluded_entry_alone(self):
+
+        self.entry["file_id"] = "cd" * 32
+        self.run_command("exclude 1")
+        self.run_command("forget all")
+
+        self.assertEqual(self.entry["status"], "excluded")
+        self.assertEqual(self.entry["file_id"], "cd" * 32)
+
+    def test_unskip_all_does_not_resurrect_an_excluded_entry(self):
+
+        self.run_command("exclude 2")
+        self.run_command("unskip all")
+
+        self.assertEqual(self.playlist.entries[1]["status"], "excluded")
+        self.assertEqual(self.playlist.entries[0]["status"], "new")
+
+    def test_a_scan_does_not_look_for_an_excluded_entry(self):
+
+        self.run_command("exclude 2")
+        self.run_command("exclude 3")
+        self.plugin.settings["scan_folders"] = [DATA_FOLDER]
+
+        # Only entry 1 is still wanted, so it is the only one scanned for
+        message = self.run_command("scan")
+
+        self.assertIn("Scanning 1 folder(s) for 1 entries", message)
+
+    def test_include_puts_an_entry_back(self):
+
+        self.run_command("exclude 2")
+
+        message = self.run_command("include 2")
+
+        self.assertEqual(self.playlist.entries[1]["status"], "new")
+        self.assertIn("Put 1", message)
+
+        # And it is searched again
+        self.run_command("search all")
+
+        self.assertEqual(self.plugin._search_queue, [2, 3])
+
+    def test_including_an_entry_that_still_has_its_file_says_hashed(self):
+
+        path = write_audio_file()
+        self.run_command(f'setpath 1 "{path}"')
+
+        self.assertTrue(self.wait_for(lambda: self.entry["file_id"]))
+
+        self.run_command("exclude 1")
+        self.run_command("include 1")
+
+        self.assertEqual(self.entry["status"], "hashed")
+
+    def test_including_something_that_was_never_excluded_says_so(self):
+
+        message = self.run_command("include 2")
+
+        self.assertIn("Not excluded", message)
+        self.assertEqual(self.playlist.entries[1]["status"], "new")
+
+    def test_an_excluded_entry_with_a_file_is_shown_as_excluded(self):
+
+        path = write_audio_file()
+        self.run_command(f'setpath 1 "{path}"')
+
+        self.assertTrue(self.wait_for(lambda: self.entry["file_id"]))
+
+        self.run_command("exclude 1")
+
+        listing = self.run_command("list excluded")
+
+        self.assertIn("[excluded", listing)
+        self.assertNotIn("hashed:", listing)
+
+    def test_an_exclusion_survives_a_reload(self):
+
+        self.run_command("exclude 1 bob has the only copy")
+
+        import napstr_state  # pylint: disable=import-outside-toplevel
+
+        reloaded = napstr_state.load_playlist(CONFIG.data_folder_path, self.playlist.id)
+
+        self.assertEqual(reloaded.entries[0]["status"], "excluded")
+        self.assertIn("bob has the only copy", reloaded.entries[0]["notes"])
+
+
 class SkipAndStatusTest(PluginTestCase):
 
     def test_skip_and_unskip(self):

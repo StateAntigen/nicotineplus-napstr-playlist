@@ -276,6 +276,8 @@ def main():
     parser.add_argument("--max-size-mb", type=int, default=0)
     parser.add_argument("--keep-files", action="store_true",
                         help="Only clear decisions; keep every file ID and local path")
+    parser.add_argument("--include-excluded", action="store_true",
+                        help="Also reset entries you excluded, which are otherwise left alone")
     parser.add_argument("--drop-files", action="store_true",
                         help="Drop every file ID and local path, whatever is on disk")
     parser.add_argument("--delete-unlinked", action="store_true",
@@ -351,8 +353,17 @@ def main():
     unlinked = []
     cleared = 0
     bitrates = []
+    excluded = []
 
     for entry in playlist.entries:
+
+        # An excluded entry is out of the playlist on purpose. Its file may be
+        # the user's own copy, so nothing here touches it either - not the
+        # state, and not the file.
+        if (entry.get("status") == napstr_state.STATUS_EXCLUDED
+                and not args.include_excluded):
+            excluded.append(entry.get("position"))
+            continue
 
         if args.drop_files:
             keep, detail = False, "dropped by --drop-files"
@@ -387,10 +398,18 @@ def main():
 
         # The plugin's own reset, so a field it clears (the dead-source list is
         # newer than this tool) cannot be left behind by a copy kept in here.
+        # Exclusions are guarded by reset_entries itself, which is why the flag
+        # has to be passed down: without it --include-excluded silently did
+        # nothing at all.
         napstr_state.reset_entries(
-            playlist, positions=[entry["position"]], drop_files=not keep)
+            playlist, positions=[entry["position"]], drop_files=not keep,
+            protect_excluded=not args.include_excluded)
     print(f"Decisions cleared for {cleared} of {len(playlist.entries)} entries.")
     print(f"File IDs dropped for {len(unlinked)} entries.")
+
+    if excluded:
+        print(f"Left alone: {len(excluded)} deliberately excluded entr(y/ies) "
+              "(--include-excluded resets them too).")
 
     if unlinked:
         print()

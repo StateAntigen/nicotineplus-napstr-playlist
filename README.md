@@ -26,7 +26,7 @@ Exportify CSV  ->  per-entry Soulseek search  ->  scored candidates
 | `plugin/napstr_playlist/napstr_relay.py` | RFC 6455 WebSocket client and Nostr relay pool |
 | `plugin/napstr_playlist/napstr_event.py` | Kind 30425 event build, sign and validate |
 | `plugin/napstr_playlist/napstr_dialog.py` | Optional GTK4 review window |
-| `tests/` | 217 unit tests, runnable with any Python 3.8+ interpreter |
+| `tests/` | 274 unit tests, runnable with any Python 3.8+ interpreter |
 | `tools/selfcheck.py` | Static checks (compile, undefined attributes, callback ownership) |
 | `tools/reset_playlist.py` | Clears a playlist's decisions, re-queues files that no longer pass the filters |
 | `tools/deploy.ps1` | Installs/uninstalls the plugin into `%APPDATA%\nicotine\plugins` |
@@ -103,6 +103,8 @@ Changed your filters and want another go at the entries you are unhappy with?
 /napstr reset missing     # ... for every entry without a file ID yet
 /napstr reset all         # ... for every entry
 /napstr forget 22         # same, but also drop the file ID and local path
+/napstr exclude 40        # drop entry 40 from the playlist for good
+/napstr include 40        # ... and put it back
 ```
 
 `reset` keeps what is *known* (a file ID, the local path) and clears what was
@@ -118,6 +120,49 @@ purpose, `/napstr forget <entry>` first.
 Note that `/napstr reset missing` skips entries that are queued or downloading,
 so after a stalled batch use `/napstr reset all` (which keeps file IDs) followed
 by `/napstr auto missing`.
+
+## Tracks that are not on Soulseek at all
+
+Some entries cannot be had from other people - a pressing nobody shares, a
+bootleg, a DJ edit. Those searches come back empty every time, and repeating
+them spends the one resource this plugin spends carefully. There are two honest
+ways out, and both are things you do on purpose:
+
+**Use the copy you already have.** Point the entry at your own file and it is
+hashed, published and treated like any other member:
+
+```
+/napstr setpath 40 "D:\Vinyl Rips\A2 - That Track.flac"
+```
+
+`/napstr scan` does the same in bulk: it matches your `scan_folders` against the
+entries that are still unresolved (by artist and title, then confirmed by
+content), so a whole playlist of things you own can be filled in one pass.
+
+**Drop it from the playlist.** `/napstr exclude` leaves the entry in the JSON,
+with your reason, but takes it out of the workflow:
+
+```
+/napstr exclude 40 only ever pressed on acetate
+/napstr exclude missing unavailable
+/napstr include 40                # bring it back
+```
+
+An excluded entry is not searched again (not by `missing`, not by `all`), is not
+counted as a gap by `require_full` - so one unobtainable track no longer blocks
+the whole publish - and is not in the published event. `/napstr publish` says
+which entries it left out, and `/napstr status` counts them.
+
+Exclusions are sticky on purpose. `/napstr reset all` - the routine fix after a
+stalled batch - leaves them alone and says so, `skip`/`unskip` do not resurrect
+them, and `tools/reset_playlist.py` will not touch their files even with
+`--delete-unlinked`, because the file may be your own copy. Only `/napstr
+include` (or the tool's `--include-excluded`) puts one back. That is deliberate:
+dropping a track is a decision, and no blanket command should quietly undo it.
+
+`skip` is the softer sibling: it pauses an entry without closing the door. A
+skipped entry is not searched either, but it still counts as missing for
+`require_full`, so it is the one to use when you mean "not right now".
 
 Full command list: `/napstr help`.
 
@@ -276,8 +321,10 @@ python tools/reset_playlist.py --exclude flac,aif --min-bitrate 192
 
 It backs up the playlist JSON first, never deletes files unless you pass
 `--delete-unlinked --yes`, and `--keep-files` / `--drop-files` override the
-re-check entirely. Run it with Nicotine+ closed, or `/napstr load` the playlist
-again afterwards so the running plugin sees the new state.
+re-check entirely. Entries you excluded are left completely alone (state and
+files) unless you add `--include-excluded`. Run it with Nicotine+ closed, or
+`/napstr load` the playlist again afterwards so the running plugin sees the new
+state.
 
 Once a file has been unlinked, nothing in the playlist points at it any more, so
 it is reported separately:
@@ -359,7 +406,7 @@ discovery always includes the `#t` marker filter.
 | `duration_tolerance` | 10 s | Accepted duration difference |
 | `download_folder` | *(blank)* | Blank uses `<data folder>\napstr\files\<playlist id>` |
 | `scan_folders` | *(empty)* | Folders searched by `/napstr scan` |
-| `require_full` | on | Refuse to publish unless every entry has a file ID |
+| `require_full` | on | Refuse to publish unless every entry has a file ID; excluded entries do not count |
 | `relays` | 7 public relays | Where events are published |
 | `nostr_key` | *(blank)* | `nsec1...` or 64 hex characters |
 | `relay_timeout` | 15 s | Per-relay timeout |
@@ -386,6 +433,7 @@ python tests\test_state.py      # playlist documents, hashing
 python tests\test_relay.py      # WebSocket framing, relay pool (no network)
 python tests\test_pace.py       # search pacing and ban detection
 python tests\test_plugin.py     # the plugin itself, against a fake Nicotine+
+python tests\test_tool.py       # tools/reset_playlist.py, run as its own process
 
 python tools\selfcheck.py       # compile + undefined attributes + callback ownership
 ```

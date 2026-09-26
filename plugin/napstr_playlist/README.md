@@ -11,8 +11,10 @@ result as a NAPSTR playlist event (Nostr kind `30425`).
 /napstr options 12      # candidates for one entry
 /napstr pick 12 2       # download a specific candidate
 /napstr scan            # match files you already have
+/napstr setpath 12 "D:\rips\track.flac"   # use your own copy for one entry
 /napstr hash all        # SHA-256 -> NAPSTR file IDs
 /napstr reset 12        # forget the search results for entry 12
+/napstr exclude 40      # drop entry 40 from the playlist for good
 /napstr orphans         # list stray files (add 'delete' to remove them)
 /napstr publish         # sign and publish the event
 ```
@@ -33,6 +35,17 @@ ID too, which is also what lets `/napstr auto` fetch a replacement (an entry
 that already has a hashed file is left alone, so that a track is never
 downloaded twice). Note that `reset missing` skips queued and downloading
 entries, so after a stalled batch use `reset all` followed by `auto missing`.
+
+**Tracks that are not on Soulseek are handled on purpose.** An entry whose
+searches keep coming back empty can be filled from your own files with
+`/napstr setpath <entry> <file>` (or `/napstr scan` in bulk), or dropped with
+`/napstr exclude <entry> [reason]`: an excluded entry is not searched again, is
+not counted as a gap by `require_full`, and is not published - `/napstr publish`
+says which entries it left out. Exclusions are sticky: `/napstr reset all`, the
+routine fix after a stalled batch, leaves them alone rather than quietly undoing
+them, and `/napstr include <entry>` is the only thing that puts one back.
+`skip`/`unskip` is the softer pair - a paused entry that still counts as
+missing.
 
 **A dead source is replaced automatically.** When a peer refuses a download
 (`File not shared.`, banned, logged off, connection lost) the plugin records

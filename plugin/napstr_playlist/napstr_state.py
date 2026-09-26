@@ -20,6 +20,7 @@ __all__ = [
     "HASH_CHUNK_SIZE",
     "ORPHAN_MINIMUM_AGE_SECONDS",
     "PLUGIN_FOLDER_NAME",
+    "STATUS_EXCLUDED",
     "STATUSES",
     "PlaylistState",
     "delete_playlist",
@@ -47,14 +48,18 @@ STATUS_HASHED = "hashed"
 STATUS_SKIPPED = "skipped"
 STATUS_FAILED = "failed"
 STATUS_UNAVAILABLE = "unavailable"
+# Deliberately removed from the playlist: not searched again, not a gap for
+# require_full, and not published. Only /napstr include puts it back.
+STATUS_EXCLUDED = "excluded"
 
 STATUSES = (
     STATUS_NEW, STATUS_SEARCHING, STATUS_REVIEW, STATUS_QUEUED, STATUS_DOWNLOADING,
-    STATUS_DOWNLOADED, STATUS_HASHED, STATUS_SKIPPED, STATUS_FAILED, STATUS_UNAVAILABLE
+    STATUS_DOWNLOADED, STATUS_HASHED, STATUS_SKIPPED, STATUS_FAILED, STATUS_UNAVAILABLE,
+    STATUS_EXCLUDED
 )
 
 # Statuses that need no further action
-FINAL_STATUSES = (STATUS_HASHED, STATUS_SKIPPED)
+FINAL_STATUSES = (STATUS_HASHED, STATUS_SKIPPED, STATUS_EXCLUDED)
 
 # How recently a staging file may have been written and still be reported as an
 # orphan. A download that has just finished may not be linked to its entry yet,
@@ -201,11 +206,21 @@ class PlaylistState:
     def resolved_entries(self):
         return [entry for entry in self.entries if entry.get("file_id")]
 
+    def excluded_entries(self):
+        """Entries the user deliberately took out of the playlist."""
+
+        return [entry for entry in self.entries
+                if entry.get("status") == STATUS_EXCLUDED]
+
     def publishable_tracks(self):
         """Return ``(tracks, skipped)`` in member order, deduplicated by file ID.
 
         The NIP forbids repeating a file ID inside one playlist, and positions
         must be contiguous from 1, so duplicates are dropped and reported.
+
+        Deliberately excluded entries are neither published nor reported as
+        skipped: the user removed them on purpose, so they are not a gap that
+        ``require_full`` should refuse over.
         """
 
         tracks = []
@@ -213,6 +228,9 @@ class PlaylistState:
         seen = set()
 
         for entry in self.entries:
+            if entry.get("status") == STATUS_EXCLUDED:
+                continue
+
             file_id = entry.get("file_id")
 
             if not file_id:
@@ -436,12 +454,17 @@ def find_orphans(playlist, folder, minimum_age_seconds=0, now=None):
     return orphans, partials, skipped
 
 
-def reset_entries(playlist, positions=None, drop_files=False):
+def reset_entries(playlist, positions=None, drop_files=False, protect_excluded=True):
     """Clear what was *decided* about entries, keeping what is *known*.
 
     Search results and choices are throwaway; a file ID and local path are
     facts about bytes on disk, so they survive unless ``drop_files`` is set.
     Returns the number of entries changed.
+
+    An excluded entry is left alone: taking a track out of the playlist is a
+    deliberate act, and a blanket ``/napstr reset all`` (the routine fix after a
+    stalled batch) must not quietly undo it. ``protect_excluded=False``, or
+    ``/napstr include``, is how an entry comes back.
     """
 
     wanted = None if positions is None else set(positions)
@@ -449,6 +472,9 @@ def reset_entries(playlist, positions=None, drop_files=False):
 
     for entry in playlist.entries:
         if wanted is not None and entry.get("position") not in wanted:
+            continue
+
+        if protect_excluded and entry.get("status") == STATUS_EXCLUDED:
             continue
 
         entry["candidates"] = []

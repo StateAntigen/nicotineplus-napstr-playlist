@@ -227,11 +227,15 @@ class ReviewWindow(Gtk.Window):
         skip_button = Gtk.Button(label="Skip")
         skip_button.connect("clicked", self._on_skip, entry["position"])
 
+        exclude_button = Gtk.Button(label="Exclude")
+        exclude_button.connect("clicked", self._on_exclude, entry["position"])
+
         box.append(label)
         box.append(score_label)
         box.append(status_label)
         box.append(options_button)
         box.append(skip_button)
+        box.append(exclude_button)
         container.set_child(box)
         self.list_box.append(container)
 
@@ -240,15 +244,19 @@ class ReviewWindow(Gtk.Window):
             "label": label,
             "score": score_label,
             "status": status_label,
-            "skip": skip_button
+            "skip": skip_button,
+            "exclude": exclude_button
         }
 
     def _update_row(self, row, entry):
 
-        status = entry.get("status", napstr_state.STATUS_NEW)
+        # The raw status decides the buttons; the shown status prefers the file
+        # ID, and an excluded entry can still have one.
+        raw_status = entry.get("status", napstr_state.STATUS_NEW)
         score = entry.get("score")
+        status = raw_status
 
-        if entry.get("file_id"):
+        if entry.get("file_id") and raw_status != napstr_state.STATUS_EXCLUDED:
             status = f"hashed {entry['file_id'][:10]}"
 
         row["label"].set_text(f"{entry['position']}. {entry['artist']} - {entry['title']}")
@@ -256,7 +264,9 @@ class ReviewWindow(Gtk.Window):
             entry.get("local_path") or entry.get("notes") or entry.get("query") or entry["title"])
         row["score"].set_text("" if score is None else f"{float(score):.2f}")
         row["status"].set_text(status)
-        row["skip"].set_label("Unskip" if status == napstr_state.STATUS_SKIPPED else "Skip")
+        row["skip"].set_label("Unskip" if raw_status == napstr_state.STATUS_SKIPPED else "Skip")
+        row["exclude"].set_label(
+            "Include" if raw_status == napstr_state.STATUS_EXCLUDED else "Exclude")
 
     # ------------------------------------------------------------------
     # actions
@@ -277,6 +287,11 @@ class ReviewWindow(Gtk.Window):
     def _on_skip(self, button, position):
 
         action = "unskip" if button.get_label() == "Unskip" else "skip"
+        self._run_command(f"{action} {position}")
+
+    def _on_exclude(self, button, position):
+
+        action = "include" if button.get_label() == "Include" else "exclude"
         self._run_command(f"{action} {position}")
 
     def _on_options(self, _button, position):
