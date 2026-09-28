@@ -300,7 +300,7 @@ were dropped by them.
 
 | Filter | Setting | Notes |
 | --- | --- | --- |
-| Format | `excluded_formats` | `flac` is excluded by default; the word `lossless` covers `flac`, `aif`, `aiff`, `wav`, `ape`, `wv`, `alac`, `dsf`, `dff` and `tta` in one entry |
+| Format | `excluded_formats` | `lossless` and `m4a` are excluded by default; the word `lossless` covers `flac`, `aif`, `aiff`, `wav`, `ape`, `wv`, `alac`, `dsf`, `dff` and `tta` in one entry |
 | Format | `preferred_format` | Soft preference (a score bonus), not a filter |
 | Bitrate | `min_bitrate`, `max_bitrate` | kbps; `0` means "no limit". A reported bitrate is trusted, a local file's size is only checked when the format lets it be inferred |
 | Size | `min_size_mb`, `max_size_mb` | MB; `0` means "no limit" |
@@ -308,6 +308,9 @@ were dropped by them.
 A local file whose size implies an impossible bitrate (a 60 MB `.mp3` for a
 three minute track, or a 20 kB stub) is skipped by `/napstr scan` rather than
 matched, so neither junk files nor truncated downloads become playlist members.
+So is a file in a format you excluded: an `.m4a` on disk is not picked up by a
+scan while `m4a` is excluded. `/napstr setpath` is the deliberate way in - it
+attaches the file you name whatever its format.
 
 Once you tighten a filter, the files you already downloaded under the old rules
 are still on disk and still linked. `tools/reset_playlist.py` re-checks every
@@ -436,7 +439,7 @@ discovery always includes the `#t` marker filter.
 | `search_interval` | 60 s | Gap between searches (floor 45 s; the server bans floods) |
 | `respect_server_interval` | on | Also wait out the server's wishlist wait period |
 | `preferred_format` | `any` | `flac`, `mp3`, `ogg`, `opus`, `m4a`, `wav` |
-| `excluded_formats` | `flac` | Formats never downloaded; the word `lossless` covers them all |
+| `excluded_formats` | `lossless, m4a` | Formats never downloaded; the word `lossless` covers them all |
 | `min_bitrate` | 0 | Reject candidates and files below this bitrate (kbps) |
 | `max_bitrate` | 0 | Reject candidates and files above this bitrate (kbps) |
 | `min_size_mb` | 0 | Reject files smaller than this (MB) |

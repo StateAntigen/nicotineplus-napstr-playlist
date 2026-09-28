@@ -43,7 +43,10 @@ import napstr_match  # noqa: E402  pylint: disable=wrong-import-position
 import napstr_state  # noqa: E402  pylint: disable=wrong-import-position
 
 # Mirrors the plugin defaults, so a plain run means "what the plugin would do".
-DEFAULT_EXCLUDED = "flac"
+# Kept in step with the plugin's own default (plugin/napstr_playlist/__init__.py):
+# 'lossless' covers every lossless container, and m4a is excluded outright because
+# it is usually AAC, which a playlist full of mp3s does not want mixed in.
+DEFAULT_EXCLUDED = "lossless,m4a"
 
 
 def default_data_folder():

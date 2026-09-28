@@ -102,7 +102,7 @@ class Plugin(BasePlugin):
             "search_interval": napstr_pace.DEFAULT_SEARCH_INTERVAL,
             "respect_server_interval": True,
             "preferred_format": "any",
-            "excluded_formats": ["flac"],
+            "excluded_formats": ["lossless", "m4a"],
             "min_bitrate": 0,
             "max_bitrate": 0,
             "min_size_mb": 0,
@@ -179,7 +179,8 @@ class Plugin(BasePlugin):
             },
             "excluded_formats": {
                 "description": ("Formats never to download. The word 'lossless' covers flac, "
-                                "aif, aiff, wav, ape, wv, alac, dsf, dff and tta"),
+                                "aif, aiff, wav, ape, wv, alac, dsf, dff and tta. Default: "
+                                "lossless, m4a"),
                 "group": "Matching",
                 "type": "list string"
             },

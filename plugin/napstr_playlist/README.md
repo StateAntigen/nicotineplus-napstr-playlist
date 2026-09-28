@@ -23,7 +23,7 @@ result as a NAPSTR playlist event (Nostr kind `30425`).
 the plugin settings hold your Nostr key, relays and matching preferences.
 
 **Downloads are filtered.** A candidate is rejected outright when its format is
-excluded (`flac` by default), its bitrate falls outside your minimum and maximum,
+excluded (`lossless` and `m4a` by default), its bitrate falls outside your minimum and maximum,
 or its size falls outside yours, and an entry whose every candidate is rejected
 is marked `unavailable` instead of getting the least bad one. A file name that
 credits a different artist than the entry also loses points, which is what stops

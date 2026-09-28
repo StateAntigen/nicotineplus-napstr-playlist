@@ -161,6 +161,29 @@ class MegabyteTest(unittest.TestCase):
 
             self.assertEqual([path for path, _score in matches], [mp3_path])
 
+    def test_a_local_file_of_an_excluded_format_is_not_matched(self):
+        """Scan applies the same filter as downloading: no m4a gets in by itself.
+
+        A file can still be attached by hand with /napstr setpath; it is only
+        the automatic matching that respects the filter.
+        """
+
+        import tempfile  # pylint: disable=import-outside-toplevel
+
+        with tempfile.TemporaryDirectory() as folder:
+            m4a_path = os.path.join(folder, "Metallica - Enter Sandman.m4a")
+
+            with open(m4a_path, "wb") as file_handle:
+                file_handle.write(b"x" * 4096)
+
+            entry = dict(ENTRY, duration_ms=None)
+            options = napstr_match.ScoringOptions(excluded_extensions=["lossless", "m4a"])
+
+            self.assertEqual(
+                napstr_match.find_local_matches(
+                    entry, [m4a_path], options=options, threshold=0.5),
+                [])
+
     def test_implausible_sizes_are_skipped_when_scanning(self):
         """A 320 kbps file must not be rejected just for being large."""
 

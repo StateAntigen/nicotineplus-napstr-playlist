@@ -1027,18 +1027,30 @@ class PublishTest(PluginTestCase):
 class FilterTest(PluginTestCase):
     """Excluded formats and the min/max limits, end to end."""
 
-    def test_flac_is_excluded_by_default(self):
+    def test_lossless_and_m4a_are_excluded_by_default(self):
 
-        self.assertEqual(self.plugin._excluded_extensions(), ["flac"])
-        self.assertIn("excluding flac", self.plugin._filter_summary())
+        self.assertEqual(self.plugin.settings["excluded_formats"], ["lossless", "m4a"])
 
-        options = self.plugin.scoring_options()
-        score, reasons = napstr_playlist.napstr_match.score_candidate(
+        excluded = self.plugin._excluded_extensions()
+
+        # 'lossless' is a keyword, so it stands for every lossless container
+        for extension in ("flac", "aif", "aiff", "wav", "ape", "wv", "alac", "dsf", "dff", "tta"):
+            self.assertIn(extension, excluded)
+
+        self.assertIn("m4a", excluded)
+        self.assertIn("excluded format: m4a", self._reason_for_extension("m4a"))
+        self.assertIn("excluded format: flac", self._reason_for_extension("flac"))
+        self.assertIn("m4a", self.plugin._filter_summary())
+
+    def _reason_for_extension(self, extension):
+        """The rejection reason a candidate with this extension gets by default."""
+
+        _score, reasons = napstr_playlist.napstr_match.score_candidate(
             {"title": "Enter Sandman", "artist": "Metallica"},
-            "Music\\Metallica\\Enter Sandman.flac", options=options)
+            f"Music\\Metallica\\Enter Sandman.{extension}",
+            options=self.plugin.scoring_options())
 
-        self.assertEqual(score, 0.0)
-        self.assertEqual(reasons, ["excluded format: flac"])
+        return reasons[0] if reasons else ""
 
     def test_filters_reach_the_summary(self):
 
@@ -1379,7 +1391,8 @@ class SkipAndStatusTest(PluginTestCase):
         self.assertIn("Search pace", text)
         self.assertIn("one search every", text)
         self.assertIn("Filters", text)
-        self.assertIn("excluding flac", text)
+        self.assertIn("excluding", text)
+        self.assertIn("flac", text)
 
     def test_help_lists_the_new_commands(self):
 
