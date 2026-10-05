@@ -26,7 +26,9 @@ the plugin settings hold your Nostr key, relays and matching preferences.
 one you were last working on is reopened when the plugin is enabled again (kept
 in the plugin's own state folder, not in your settings). To fold a re-exported
 CSV into an existing playlist instead - keeping the files and hashes of tracks
-that are still in it - point the `playlist_id` setting at that playlist.
+that are still in it - point the `playlist_id` setting at that playlist; a CSV
+that no longer lists tracks which already have files is refused rather than
+obeyed, and `--replace` is how you accept that drop.
 
 **Downloads are filtered.** A candidate is rejected outright when its format is
 excluded (`lossless` and `m4a` by default), its bitrate falls outside your minimum and maximum,

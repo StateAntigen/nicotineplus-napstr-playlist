@@ -357,6 +357,51 @@ class PlaylistSwitchingTest(PluginTestCase):
         self.assertIn("1 dropped", log)
         self.assertIn("/napstr orphans", log)
 
+    def test_a_revision_refuses_to_drop_a_track_that_has_a_file(self):
+        """The wrong CSV for a playlist must not throw the downloads away."""
+
+        import napstr_state  # pylint: disable=import-outside-toplevel
+
+        playlist = self.load_playlist()
+        entry = playlist.entries[1]  # Rooster, the one the revised CSV drops
+        entry["file_id"] = "cd" * 32
+        entry["local_path"] = write_audio_file()
+        playlist.save(force=True)
+
+        self.plugin.settings["playlist_id"] = playlist.id
+
+        message = self.run_command(f'load "{write_rows_csv("Revised.csv", REVISED_ROWS)}"')
+
+        self.assertIn("Refusing to revise", message)
+        self.assertIn("--replace", message)
+
+        # Nothing was touched: not the entries, not the file ID
+        stored = napstr_state.load_playlist(CONFIG.data_folder_path, playlist.id)
+
+        self.assertEqual(len(stored.entries), len(CSV_ROWS))
+        self.assertEqual(stored.entries[1]["file_id"], "cd" * 32)
+        self.assertEqual(stored.entries[1]["title"], "Rooster")
+
+    def test_replace_is_the_deliberate_way_to_accept_the_drop(self):
+
+        playlist = self.load_playlist()
+        entry = playlist.entries[1]
+        entry["file_id"] = "cd" * 32
+        entry["local_path"] = write_audio_file()
+        playlist.save(force=True)
+
+        self.plugin.settings["playlist_id"] = playlist.id
+
+        self.run_command(
+            f'load "{write_rows_csv("Revised.csv", REVISED_ROWS)}" --replace')
+
+        log = "\n".join(self.plugin.log_lines)
+
+        self.assertIn("1 dropped", log)
+        self.assertEqual(
+            [entry["title"] for entry in self.plugin.playlist.entries],
+            ["Enter Sandman", "Human Now (feat. Luke Steele)", "Strobe"])
+
     def test_a_revision_keeps_the_published_history(self):
 
         playlist = self.load_playlist()
@@ -1306,6 +1351,40 @@ class PublishTest(PluginTestCase):
         # Three entries, one file ID: duplicate members are dropped by the NIP
         self.assertIn("Refusing to publish", message)
         self.assertEqual(self.published, [])
+
+    def test_a_revision_says_when_the_title_changes(self):
+        """A revision replaces the playlist a reader already has, name included."""
+
+        playlist = self.load_playlist()
+
+        for index, entry in enumerate(playlist.entries):
+            entry["file_id"] = f"{index + 1:064x}"
+
+        playlist.published.append({
+            "event_id": "e" * 64, "created_at": 1, "relays": ["wss://relay.test"],
+            "title": "Night Rider", "members": 3
+        })
+        playlist.save(force=True)
+
+        message = self.run_command("publish")
+
+        self.assertIn("revises the playlist published as 'Night Rider'", message)
+        self.assertIn(playlist.id, message)
+
+    def test_an_unchanged_title_says_nothing_about_revising(self):
+
+        playlist = self.load_playlist()
+
+        for index, entry in enumerate(playlist.entries):
+            entry["file_id"] = f"{index + 1:064x}"
+
+        playlist.published.append({
+            "event_id": "e" * 64, "created_at": 1, "relays": ["wss://relay.test"],
+            "title": playlist.title, "members": 3
+        })
+        playlist.save(force=True)
+
+        self.assertNotIn("revises the playlist published as", self.run_command("publish"))
 
 
 class FilterTest(PluginTestCase):

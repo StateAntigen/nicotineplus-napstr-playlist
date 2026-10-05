@@ -607,7 +607,8 @@ class Plugin(BasePlugin):
         self.output(
             "NAPSTR playlist commands:\n"
             "\t/napstr load <exportify.csv|zip> [| title]   import a playlist\n"
-            "\t                                             (revises the playlist_id setting if set)\n"
+            "\t                                             (revises the playlist_id setting if set;\n"
+            "\t                                             --replace accepts dropped tracks)\n"
             "\t/napstr open <playlist id>                   load a stored playlist\n"
             "\t/napstr playlists                           list stored playlists\n"
             "\t/napstr list [page|status]                  show entries\n"
@@ -665,10 +666,17 @@ class Plugin(BasePlugin):
 
     def _action_load(self, rest):
 
+        # '--replace' is the deliberate answer to "yes, drop the members that are
+        # no longer in this CSV even though they have files", see _revise_playlist.
+        replace = "--replace" in (rest or "")
+
+        if replace:
+            rest = rest.replace("--replace", "")
+
         path, title = self._split_path_and_title(rest)
 
         if not path:
-            self.output("Usage: /napstr load <exportify.csv|zip> [| title]")
+            self.output("Usage: /napstr load <exportify.csv|zip> [| title] [--replace]")
             return False
 
         path = os.path.expandvars(os.path.expanduser(path))
@@ -703,7 +711,7 @@ class Plugin(BasePlugin):
         existing = napstr_state.load_playlist(self.data_folder_path, playlist_id) if playlist_id else None
 
         if existing is not None:
-            return self._revise_playlist(existing, entries, path, title)
+            return self._revise_playlist(existing, entries, path, title, replace)
 
         self.playlist = napstr_state.PlaylistState(
             self.data_folder_path,
@@ -725,7 +733,7 @@ class Plugin(BasePlugin):
 
         return True
 
-    def _revise_playlist(self, playlist, rows, source, title):
+    def _revise_playlist(self, playlist, rows, source, title, replace=False):
         """Replace a playlist's members from a fresh CSV, keeping its identity.
 
         This is what the 'playlist_id' setting is for: a re-exported Exportify
@@ -734,6 +742,12 @@ class Plugin(BasePlugin):
         second playlist. A track still present in the CSV keeps everything
         already known about it - file ID, local path, chosen candidate - so a
         revision does not mean fetching the whole playlist again.
+
+        Nothing is dropped silently once it has a file: a CSV that no longer
+        lists a track the playlist has already downloaded is usually the wrong
+        CSV for this playlist, and obeying it would throw away the hash and
+        re-publish a coordinate naming files nobody resolved. Saying so costs
+        one command; getting it wrong costs the downloads.
         """
 
         previous = {entry["uri"]: entry for entry in playlist.entries if entry.get("uri")}
@@ -761,6 +775,26 @@ class Plugin(BasePlugin):
             kept += 1
 
         dropped = list(previous.values())
+        resolved = [entry for entry in dropped if entry.get("file_id")]
+
+        if resolved and not replace:
+            positions = ", ".join(str(entry.get("position")) for entry in resolved[:10])
+
+            self.output(
+                f"Refusing to revise {playlist.id}: this CSV does not list {len(resolved)} "
+                f"entr(y/ies) that already have a file ID ({positions}"
+                + ("..." if len(resolved) > 10 else "")
+                + "), so revising would throw their hashes away and publish a shorter "
+                "playlist than the one already on the relays.")
+            self.output(
+                "If this really is a newer export of the same playlist, and those tracks have "
+                "left it, run the same command with --replace.")
+            self.output(
+                "If it is a different playlist, clear the 'playlist_id' setting and load it "
+                "again to start a new one - a separate playlist is a separate coordinate, and "
+                "this one keeps its members.")
+
+            return False
 
         for index, record in enumerate(merged, start=1):
             record["position"] = index
@@ -2658,6 +2692,19 @@ class Plugin(BasePlugin):
         self.output(
             f"Publishing '{title}' with {len(tracks)} member(s) as "
             f"{self._identity_npub()[0] or 'the configured key'} to {len(relays)} relay(s)...")
+
+        previous = self.playlist.published[-1] if self.playlist.published else None
+
+        if previous and previous.get("title") and previous["title"] != title:
+            # The coordinate is (author, playlist id), so this replaces the
+            # playlist the reader already has - including its name. Worth
+            # saying out loud: a title that changed by accident renames a
+            # published playlist, which looks like a different playlist
+            # appearing rather than the same one being edited.
+            self.output(
+                f"Note: this revises the playlist published as '{previous['title']}' at "
+                f"coordinate {self.playlist.id}; the new revision carries the title "
+                f"'{title}'.")
 
         thread = threading.Thread(target=self._publish_worker, args=(event, relays),
                                   name="napstr-publish", daemon=True)

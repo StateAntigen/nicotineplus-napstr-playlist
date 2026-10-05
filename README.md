@@ -26,7 +26,7 @@ Exportify CSV  ->  per-entry Soulseek search  ->  scored candidates
 | `plugin/napstr_playlist/napstr_relay.py` | RFC 6455 WebSocket client and Nostr relay pool |
 | `plugin/napstr_playlist/napstr_event.py` | Kind 30425 event build, sign and validate |
 | `plugin/napstr_playlist/napstr_dialog.py` | Optional GTK4 review window |
-| `tests/` | 276 unit tests, runnable with any Python 3.8+ interpreter |
+| `tests/` | 300 unit tests, runnable with any Python 3.8+ interpreter |
 | `tools/selfcheck.py` | Static checks (compile, undefined attributes, callback ownership) |
 | `tools/reset_playlist.py` | Clears a playlist's decisions, re-queues files that no longer pass the filters |
 | `tools/deploy.ps1` | Installs/uninstalls the plugin into `%APPDATA%\nicotine\plugins` |
@@ -79,6 +79,14 @@ rather than a second playlist, and it folds the CSV in intelligently:
 The log reports the counts (`2 kept with their files and hashes, 1 added,
 1 dropped`), and the setting may be cleared at any time to go back to "every
 load is a new playlist".
+
+**A revision refuses to drop a track that already has a file.** Pointing a CSV
+at the wrong playlist would otherwise throw away hashes for tracks that are
+simply not in that file, and re-publish a coordinate naming files nothing
+resolved. The refusal names the entries and offers the two honest answers:
+`--replace` when it really is a newer export and those tracks have left the
+playlist, or clear `playlist_id` when it is a different playlist that deserves
+its own coordinate.
 
 Then let it find the tracks:
 
@@ -423,13 +431,20 @@ tag per member, `alt` exactly `Napstr public playlist`, and a 128 KiB content
 budget. The signed event is checked with `napstr_event.validate_playlist_event`
 — including the NIP-01 event ID and signature — before it is sent anywhere.
 
-Two deliberate behaviours worth knowing:
+Three deliberate behaviours worth knowing:
 
 * **Publishing refuses incomplete playlists by default.** `require_full` is on,
   so `/napstr publish` stops and lists the entries that have no file ID yet
   instead of silently publishing a shorter playlist. Turn the setting off to
   publish only the resolved members — the NIP requires contiguous positions
   and unique members, so unresolved or repeated entries are dropped either way.
+* **A revision replaces the playlist a reader already has, name included.**
+  The coordinate is (author, playlist id), so publishing again rewrites that
+  one playlist rather than adding a second. When the title no longer matches
+  the last revision, `/napstr publish` says so first (`this revises the
+  playlist published as 'Night Rider' at coordinate ...`), which is the cheap
+  way to catch a title that changed by accident. `/napstr title` renames on
+  purpose; `/napstr load` never renames anything.
 * **Publishing is public.** A playlist reveals its title and membership, so the
   NIP has no private variant. There is also no seeding requirement: a playlist
   is curation, not a claim that you hold the files.
