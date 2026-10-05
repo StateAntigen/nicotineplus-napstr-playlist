@@ -1571,6 +1571,20 @@ class Plugin(BasePlugin):
             # is the whole point when a filter is what emptied an entry.
             entry["candidates"] = ranked
 
+            if self._has_a_usable_file(entry):
+                # The entry got its file while this search was in flight - a
+                # /napstr setpath, or a download that landed first. A search
+                # window closing late must not demote it: the status would read
+                # "unavailable" while the file is on disk and its hash is what
+                # gets published, so the entry hides from /napstr list
+                # unavailable while the review window draws it as hashed.
+                # Only the demotion is skipped: a file that has since gone is
+                # still filled normally, and an entry with usable candidates
+                # still takes the duplicate-download path below.
+                self.playlist.dirty = True
+                self._save_playlist()
+                return
+
             if ranked:
                 reasons = ranked[0].get("reasons") or []
                 example = reasons[0] if reasons else "no reason recorded"

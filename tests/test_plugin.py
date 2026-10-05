@@ -998,6 +998,29 @@ class DownloadTest(PluginTestCase):
         self.assertEqual(entry["file_id"], hashlib.sha256(content).hexdigest())
         self.assertEqual(entry["status"], "hashed")
 
+    def test_a_late_search_does_not_demote_an_entry_that_has_its_file(self):
+        """A search window closing after the file arrived must not undo it.
+
+        The order that produced this: /napstr setpath queues a hash, the hash
+        finishes, and only then does the search that was already in flight
+        report no results - leaving a status of "unavailable" on an entry that
+        has a file ID, so it disappears from /napstr list unavailable while the
+        review window draws it as hashed.
+        """
+
+        playlist = self.load_playlist()
+        entry = playlist.entries[0]
+        entry["file_id"] = "ab" * 32
+        entry["local_path"] = write_audio_file()
+        playlist.set_status(entry, "hashed", "")
+
+        entry["candidates"] = []
+        self.plugin._finish_search_for_position(1)
+
+        self.assertEqual(entry["status"], "hashed")
+        self.assertEqual(entry["notes"], "")
+        self.assertEqual(len(entry["candidates"]), 0)
+
     def test_setpath_hashes_the_file(self):
 
         playlist = self.load_playlist()
