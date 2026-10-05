@@ -129,7 +129,8 @@ class Plugin(BasePlugin):
                 "type": "string"
             },
             "playlist_id": {
-                "description": "Playlist UUID (blank generates one; keep it to revise the same playlist)",
+                "description": ("Revise this playlist UUID on the next load (blank means every "
+                                "load starts a new playlist)"),
                 "group": "Playlist",
                 "type": "string"
             },
@@ -285,13 +286,51 @@ class Plugin(BasePlugin):
         self._schedule_download_sweep()
         self.log("Loaded. Type /napstr help for the command list.")
 
+        # Reopen what was last worked on. The 'playlist_id' setting wins when
+        # the user has set it, because that is a deliberate instruction; it is
+        # deliberately not written back below, so a load never inherits the
+        # previous playlist by accident.
+        self._adopt_legacy_playlist_id()
+
         playlist_id = str(self.settings.get("playlist_id") or "").strip()
+        playlist_id = playlist_id or napstr_state.last_opened(self.data_folder_path)
 
         if playlist_id:
             state = napstr_state.load_playlist(self.data_folder_path, playlist_id)
 
             if state is not None:
                 self.playlist = state
+
+    def _adopt_legacy_playlist_id(self):
+        """Take back a 'playlist_id' that an older version wrote by itself.
+
+        That version stored every loaded playlist's id in this setting and then
+        read it to pick the target of the next load, so a value left behind from
+        then usually is not the user's instruction - but the setting now means
+        "replace that playlist's tracks with the next CSV", which is far too
+        destructive to trigger on a value the plugin wrote for its own bookkeeping.
+
+        A value equal to the playlist we would reopen anyway is adopted into the
+        reopen memory and cleared; a value pointing somewhere else is left alone,
+        because only the user could have set that.
+        """
+
+        legacy = str(self.settings.get("playlist_id") or "").strip()
+
+        if not legacy:
+            return
+
+        remembered = napstr_state.last_opened(self.data_folder_path)
+
+        if remembered and remembered != legacy:
+            return
+
+        napstr_state.remember_opened(self.data_folder_path, legacy)
+        self.settings["playlist_id"] = ""
+        self.log(
+            "NAPSTR: the 'playlist_id' setting held a playlist this plugin had remembered "
+            "by itself; it has been cleared and the playlist is still reopened as before. "
+            "Set 'playlist_id' deliberately if you want /napstr load to revise it.")
 
     def shutdown_notification(self):
 
@@ -568,6 +607,7 @@ class Plugin(BasePlugin):
         self.output(
             "NAPSTR playlist commands:\n"
             "\t/napstr load <exportify.csv|zip> [| title]   import a playlist\n"
+            "\t                                             (revises the playlist_id setting if set)\n"
             "\t/napstr open <playlist id>                   load a stored playlist\n"
             "\t/napstr playlists                           list stored playlists\n"
             "\t/napstr list [page|status]                  show entries\n"
@@ -605,7 +645,16 @@ class Plugin(BasePlugin):
             end = rest.find('"', 1)
 
             if end > 0:
-                return rest[1:end], rest[end + 1:].strip()
+                # A quoted path is the normal way to write a Windows path, and
+                # the ' | title' separator still follows it, so a title given
+                # this way used to keep the pipe: 'load "x.csv" | Rock' named
+                # the playlist '| Rock'.
+                title = rest[end + 1:].strip()
+
+                if title.startswith("|"):
+                    title = title[1:].strip()
+
+                return rest[1:end], title
 
         if " | " in rest:
             path, title = rest.split(" | ", 1)
@@ -654,18 +703,7 @@ class Plugin(BasePlugin):
         existing = napstr_state.load_playlist(self.data_folder_path, playlist_id) if playlist_id else None
 
         if existing is not None:
-            self.playlist = existing
-
-            if title:
-                self.playlist.title = title
-
-            self.playlist.dirty = True
-            self._save_playlist()
-            self._report(
-                f"Revising playlist {self.playlist.id} ('{self.playlist.title}') with its "
-                f"{len(self.playlist.entries)} stored entries. Load a different playlist by "
-                "clearing the 'playlist_id' setting first.", notify=True)
-            return True
+            return self._revise_playlist(existing, entries, path, title)
 
         self.playlist = napstr_state.PlaylistState(
             self.data_folder_path,
@@ -676,8 +714,7 @@ class Plugin(BasePlugin):
             source=path
         )
 
-        if not playlist_id:
-            self.settings["playlist_id"] = self.playlist.id
+        napstr_state.remember_opened(self.data_folder_path, self.playlist.id)
 
         saved_path = self.playlist.save(force=True)
 
@@ -685,6 +722,74 @@ class Plugin(BasePlugin):
             f"Loaded '{self.playlist.title}' with {len(self.playlist.entries)} entries "
             f"(id {self.playlist.id}).\nSaved to {saved_path}\n"
             "Next: /napstr auto all, or /napstr search all to review matches by hand.", notify=True)
+
+        return True
+
+    def _revise_playlist(self, playlist, rows, source, title):
+        """Replace a playlist's members from a fresh CSV, keeping its identity.
+
+        This is what the 'playlist_id' setting is for: a re-exported Exportify
+        file with tracks added or removed, folded into the playlist that keeps
+        the same coordinate, so publishing afterwards is a revision and not a
+        second playlist. A track still present in the CSV keeps everything
+        already known about it - file ID, local path, chosen candidate - so a
+        revision does not mean fetching the whole playlist again.
+        """
+
+        previous = {entry["uri"]: entry for entry in playlist.entries if entry.get("uri")}
+        rows = [row for row in rows if row.get("uri") or row.get("title")]
+
+        merged = []
+        kept = 0
+        added = 0
+
+        for row in rows:
+            record = previous.pop(row.get("uri") or "", None)
+
+            if record is None:
+                merged.append(napstr_state.new_entry(row))
+                added += 1
+                continue
+
+            # Refresh the metadata, keep the state: the CSV is the newer
+            # description of the track, not a newer description of the file.
+            for key in ("title", "artist", "album", "album_artist", "duration_ms", "isrc"):
+                if row.get(key) is not None:
+                    record[key] = row.get(key)
+
+            merged.append(record)
+            kept += 1
+
+        dropped = list(previous.values())
+
+        for index, record in enumerate(merged, start=1):
+            record["position"] = index
+
+        playlist.entries = merged
+        playlist.source = source
+
+        if title:
+            playlist.title = title
+
+        playlist.dirty = True
+        self.playlist = playlist
+        self._save_playlist()
+        napstr_state.remember_opened(self.data_folder_path, playlist.id)
+
+        report = (
+            f"Revised playlist {playlist.id} ('{playlist.title}'): {kept} kept with their "
+            f"files and hashes, {added} added, {len(dropped)} dropped."
+        )
+
+        if dropped:
+            report += (
+                " Dropped from the playlist (their files stay on disk): "
+                + ", ".join(str(entry.get("position")) for entry in dropped[:10])
+                + ("..." if len(dropped) > 10 else "")
+                + ". /napstr orphans lists any file nothing points at any more."
+            )
+
+        self._report(report + " The next publish is a revision of the same coordinate.", notify=True)
 
         return True
 
@@ -746,7 +851,7 @@ class Plugin(BasePlugin):
             return False
 
         self.playlist = state
-        self.settings["playlist_id"] = state.id
+        napstr_state.remember_opened(self.data_folder_path, state.id)
         self.output(
             f"Opened '{state.title}' ({len(state.entries)} entries, "
             f"{len(state.resolved_entries())} with a file ID). Publishing will revise "

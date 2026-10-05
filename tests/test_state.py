@@ -448,6 +448,69 @@ class ExcludedEntriesTest(unittest.TestCase):
         self.assertIn(napstr_state.STATUS_EXCLUDED, napstr_state.FINAL_STATUSES)
 
 
+class LastOpenedTest(unittest.TestCase):
+    """Which playlist to reopen is plugin state, not a Nicotine+ setting."""
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp()
+
+    def test_a_remembered_playlist_comes_back(self):
+
+        self.assertTrue(napstr_state.remember_opened(self.folder, "b5626e45-887b-42f1-9056-fc4a79f85701"))
+        self.assertEqual(
+            napstr_state.last_opened(self.folder), "b5626e45-887b-42f1-9056-fc4a79f85701")
+
+    def test_nothing_remembered_reads_as_empty(self):
+
+        self.assertEqual(napstr_state.last_opened(self.folder), "")
+
+    def test_remembering_nothing_writes_nothing(self):
+
+        self.assertFalse(napstr_state.remember_opened(self.folder, ""))
+        self.assertEqual(napstr_state.last_opened(self.folder), "")
+
+    def test_the_last_one_wins(self):
+
+        napstr_state.remember_opened(self.folder, "first")
+        napstr_state.remember_opened(self.folder, "second")
+
+        self.assertEqual(napstr_state.last_opened(self.folder), "second")
+
+
+class NewEntryTest(unittest.TestCase):
+    """A fresh member record: the CSV's metadata, and nothing decided yet."""
+
+    def test_a_new_entry_has_nothing_decided_about_it(self):
+
+        record = napstr_state.new_entry({
+            "uri": "spotify:track:1", "title": "Enter Sandman", "artist": "Metallica",
+            "album": "Metallica", "album_artist": "Metallica", "duration_ms": 331000,
+            "isrc": "USAM19100001"
+        })
+
+        self.assertEqual(record["uri"], "spotify:track:1")
+        self.assertEqual(record["title"], "Enter Sandman")
+        self.assertEqual(record["duration_ms"], 331000)
+        self.assertEqual(record["isrc"], "USAM19100001")
+        self.assertEqual(record["status"], napstr_state.STATUS_NEW)
+        self.assertEqual(record["candidates"], [])
+        self.assertIsNone(record["chosen"])
+        self.assertEqual(record["file_id"], "")
+        self.assertEqual(record["local_path"], "")
+        self.assertEqual(record["notes"], "")
+
+    def test_add_entry_builds_the_same_record(self):
+        """One definition of a fresh member, so revising cannot drift from loading."""
+
+        playlist = napstr_state.PlaylistState(tempfile.mkdtemp(), title="Rock")
+
+        added = playlist.add_entry({"uri": "spotify:track:1", "title": "Enter Sandman"})
+
+        self.assertEqual(
+            added, napstr_state.new_entry({"uri": "spotify:track:1", "title": "Enter Sandman"},
+                                          position=1))
+
+
 class FindOrphansTest(unittest.TestCase):
     """find_orphans, which is only ever pointed at one playlist's folder."""
 

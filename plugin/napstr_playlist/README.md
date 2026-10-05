@@ -22,6 +22,12 @@ result as a NAPSTR playlist event (Nostr kind `30425`).
 `/napstr help` lists every command, `/napstr review` opens a GTK window, and
 the plugin settings hold your Nostr key, relays and matching preferences.
 
+`load` always starts a new playlist, so the finished one is left alone, and the
+one you were last working on is reopened when the plugin is enabled again (kept
+in the plugin's own state folder, not in your settings). To fold a re-exported
+CSV into an existing playlist instead - keeping the files and hashes of tracks
+that are still in it - point the `playlist_id` setting at that playlist.
+
 **Downloads are filtered.** A candidate is rejected outright when its format is
 excluded (`lossless` and `m4a` by default), its bitrate falls outside your minimum and maximum,
 or its size falls outside yours, and an entry whose every candidate is rejected

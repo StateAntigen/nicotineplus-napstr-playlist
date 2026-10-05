@@ -25,9 +25,12 @@ __all__ = [
     "PlaylistState",
     "delete_playlist",
     "find_orphans",
+    "last_opened",
     "list_playlists",
     "load_playlist",
+    "new_entry",
     "new_playlist_id",
+    "remember_opened",
     "reset_entries",
     "sha256_file",
     "state_folder_path",
@@ -77,6 +80,81 @@ def state_folder_path(data_folder_path):
 
 def staging_folder_path(data_folder_path, playlist_id):
     return os.path.join(state_folder_path(data_folder_path), "files", playlist_id)
+
+
+def _last_opened_file_path(data_folder_path):
+    return os.path.join(state_folder_path(data_folder_path), "last-opened")
+
+
+def remember_opened(data_folder_path, playlist_id):
+    """Remember which playlist to reopen when the plugin is enabled again.
+
+    Which playlist you were working on is the plugin's own business, so it is
+    kept here and not in Nicotine+'s settings. Those belong to the user, and
+    ``playlist_id`` there means something else: "revise this playlist on the
+    next /napstr load". Writing it here instead is what stops a load from
+    quietly reopening the previous playlist (see ``new_entry``).
+
+    Best effort: failing to remember costs a reopen, never a save.
+    """
+
+    if not playlist_id:
+        return False
+
+    file_path = _last_opened_file_path(data_folder_path)
+
+    try:
+        # The folder is made here rather than assumed: a fresh install has no
+        # state folder until the first save, and this runs before that save.
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+        with open(file_path, "w", encoding="utf-8") as file_handle:
+            file_handle.write(str(playlist_id).strip() + "\n")
+
+        return True
+
+    except OSError:
+        return False
+
+
+def last_opened(data_folder_path):
+    """The playlist id remembered by :func:`remember_opened`, or \"\"."""
+
+    try:
+        with open(_last_opened_file_path(data_folder_path), encoding="utf-8") as file_handle:
+            value = file_handle.read().strip()
+
+    except OSError:
+        return ""
+
+    return value
+
+
+def new_entry(entry, position=None):
+    """A fresh entry record: the CSV's metadata and nothing decided yet."""
+
+    metadata = entry or {}
+
+    return {
+        "position": position if position is not None else 0,
+        "uri": metadata.get("uri", ""),
+        "title": metadata.get("title", ""),
+        "artist": metadata.get("artist", ""),
+        "album": metadata.get("album", ""),
+        "album_artist": metadata.get("album_artist", ""),
+        "duration_ms": metadata.get("duration_ms"),
+        "isrc": metadata.get("isrc", ""),
+        "status": STATUS_NEW,
+        "query": "",
+        "search_token": None,
+        "candidates": [],
+        "score": None,
+        "chosen": None,
+        "local_path": "",
+        "file_id": "",
+        "hashed_at": None,
+        "notes": ""
+    }
 
 
 def _playlists_folder_path(data_folder_path):
@@ -140,27 +218,8 @@ class PlaylistState:
     # -- entries -----------------------------------------------------------
 
     def add_entry(self, entry, position=None):
-        record = {
-            "position": position if position is not None else len(self.entries) + 1,
-            "uri": entry.get("uri", ""),
-            "title": entry.get("title", ""),
-            "artist": entry.get("artist", ""),
-            "album": entry.get("album", ""),
-            "album_artist": entry.get("album_artist", ""),
-            "duration_ms": entry.get("duration_ms"),
-            "isrc": entry.get("isrc", ""),
-            "status": STATUS_NEW,
-            "query": "",
-            "search_token": None,
-            "candidates": [],
-            "score": None,
-            "chosen": None,
-            "local_path": "",
-            "file_id": "",
-            "hashed_at": None,
-            "notes": ""
-        }
 
+        record = new_entry(entry)
         record["position"] = len(self.entries) + 1
         self.entries.append(record)
         self.dirty = True

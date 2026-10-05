@@ -12,10 +12,13 @@ and never overlaps: an earlier version sent 100 searches in 215 seconds and the
 account was banned for 30 minutes.
 """
 
+import copy
 import hashlib
 import os
+import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -64,6 +67,24 @@ def write_csv(name="Rock.csv"):
     return path
 
 
+REVISED_ROWS = [
+    # Rooster has gone, Strobe is new, the other two keep their URIs
+    CSV_ROWS[0],
+    CSV_ROWS[2],
+    "spotify:track:4,Strobe,deadmau5,For Lack of a Better Name,624000"
+]
+
+
+def write_rows_csv(name, rows):
+
+    path = os.path.join(DATA_FOLDER, name)
+
+    with open(path, "w", encoding="utf-8", newline="") as file_handle:
+        file_handle.write("\r\n".join([CSV_HEADER] + rows) + "\r\n")
+
+    return path
+
+
 def write_audio_file(name="have.mp3", content=b"x" * 4096):
     """A stand-in for a downloaded file, for entries that already hold one."""
 
@@ -90,6 +111,14 @@ class PluginTestCase(unittest.TestCase):
         self.core.downloads = fake_nicotine.FakeDownloads()
         self.core.notifications = fake_nicotine.FakeNotifications()
 
+        # Each test gets a state folder of its own. The plugin remembers the
+        # playlist it last worked on, so a shared folder would carry one test's
+        # playlist into the next - and that remembering is exactly what this
+        # suite has to be able to prove, so it cannot be faked away.
+        self.state_folder = tempfile.mkdtemp(prefix="napstr-state-")
+        CONFIG.data_folder_path = self.state_folder
+        self.addCleanup(shutil.rmtree, self.state_folder, ignore_errors=True)
+
         self.plugin = napstr_playlist.Plugin()
         self.plugin.core = self.core
         self.plugin.config = CONFIG
@@ -101,6 +130,45 @@ class PluginTestCase(unittest.TestCase):
 
     def _stop_plugin(self):
         self.plugin._shutting_down = True
+
+        # Workers run on their own threads and can still be writing when a test
+        # ends - a publish saves the playlist document as it finishes. Join them
+        # before the state folder is removed, or they raise into a deleted tree
+        # and print a PermissionError after the test has already passed. The
+        # plugin names its threads, which is what makes this exact: waiting on a
+        # flag would race the save that follows the flag.
+        deadline = time.monotonic() + 5.0
+
+        while True:
+            workers = [
+                thread for thread in threading.enumerate()
+                if thread.name.startswith(("napstr-publish", "napstr-hash"))
+                and thread.is_alive()
+            ]
+
+            if not workers or time.monotonic() > deadline:
+                return
+
+            for thread in workers:
+                thread.join(timeout=max(deadline - time.monotonic(), 0.01))
+
+    def restart_plugin(self):
+        """A second plugin instance against the same host, as on a restart.
+
+        Settings are carried over because Nicotine+ keeps them in its config:
+        a restart must not silently reset them, or a plugin that migrates a
+        setting would be tested against state the user never had.
+        """
+
+        plugin = napstr_playlist.Plugin()
+        plugin.core = self.core
+        plugin.config = CONFIG
+        plugin.human_name = "NAPSTR Playlist"
+        plugin.settings.update(copy.deepcopy(self.plugin.settings))
+        plugin.init()
+        self.addCleanup(setattr, plugin, "_shutting_down", True)
+
+        return plugin
 
     # -- helpers -----------------------------------------------------------
 
@@ -146,6 +214,222 @@ class LoadingTest(PluginTestCase):
         message = self.run_command("status")
 
         self.assertIn("No playlist loaded", message)
+
+
+class PlaylistSwitchingTest(PluginTestCase):
+    """Loading a second playlist must not drag the first one along.
+
+    The plugin used to write the loaded playlist's id into the user's
+    'playlist_id' setting and then read that setting to decide the target of
+    the next load, so every load after the first reopened the old playlist and
+    ignored the new CSV. Nothing was lost, but nothing changed either.
+    """
+
+    def test_loading_another_playlist_starts_a_new_one(self):
+
+        first = self.load_playlist()
+        first.entries[0]["file_id"] = "ab" * 32
+        first.save(force=True)
+
+        second = write_rows_csv("Second.csv", REVISED_ROWS)
+
+        self.run_command(f'load "{second}"')
+
+        self.assertIn("Loaded", "\n".join(self.plugin.log_lines))
+        self.assertNotEqual(self.plugin.playlist.id, first.id)
+        self.assertEqual(len(self.plugin.playlist.entries), len(REVISED_ROWS))
+        self.assertEqual(
+            [entry["title"] for entry in self.plugin.playlist.entries],
+            ["Enter Sandman", "Human Now (feat. Luke Steele)", "Strobe"])
+
+    def test_the_first_playlist_is_left_untouched(self):
+
+        import napstr_state  # pylint: disable=import-outside-toplevel
+
+        first = self.load_playlist()
+        first.entries[0]["file_id"] = "ab" * 32
+        first.entries[0]["notes"] = "still here"
+        first.save(force=True)
+
+        self.run_command(f'load "{write_rows_csv("Second.csv", REVISED_ROWS)}"')
+
+        stored = napstr_state.load_playlist(CONFIG.data_folder_path, first.id)
+
+        self.assertEqual(len(stored.entries), len(CSV_ROWS))
+        self.assertEqual(stored.entries[0]["file_id"], "ab" * 32)
+        self.assertEqual(stored.entries[0]["notes"], "still here")
+
+    def test_load_does_not_write_the_playlist_id_setting(self):
+
+        first = self.load_playlist()
+
+        self.assertEqual(self.plugin.settings["playlist_id"], "")
+
+        self.run_command(f'load "{write_rows_csv("Second.csv", REVISED_ROWS)}"')
+
+        self.assertEqual(self.plugin.settings["playlist_id"], "")
+        self.assertNotEqual(self.plugin.playlist.id, first.id)
+
+    def test_opening_a_playlist_does_not_write_the_setting_either(self):
+
+        opened = self.load_playlist()
+        self.run_command("open nothing-else")
+        self.run_command(f"open {opened.id}")
+
+        self.assertEqual(self.plugin.settings["playlist_id"], "")
+
+    def test_a_restart_reopens_the_last_playlist(self):
+
+        first = self.load_playlist()
+
+        second = self.load_playlist()  # a different id, loaded last
+
+        restarted = self.restart_plugin()
+
+        self.assertEqual(restarted.playlist.id, second.id)
+        self.assertNotEqual(restarted.playlist.id, first.id)
+
+    def test_a_title_after_a_quoted_path_loses_its_separator(self):
+
+        self.load_playlist()
+        self.run_command(f'load "{write_rows_csv("Titled.csv", REVISED_ROWS)}" | Night Rider')
+
+        self.assertEqual(self.plugin.playlist.title, "Night Rider")
+
+    def test_the_setting_revises_that_playlist_instead(self):
+
+        playlist = self.load_playlist()
+        entry = playlist.entries[0]
+        entry["file_id"] = "cd" * 32
+        entry["local_path"] = write_audio_file()
+        entry["candidates"] = [{"username": "u", "path": "p", "score": 0.9}]
+        playlist.save(force=True)
+
+        self.plugin.settings["playlist_id"] = playlist.id
+
+        revised = write_rows_csv("Revised.csv", REVISED_ROWS)
+        self.run_command(f'load "{revised}" | Night Rider')
+
+        self.assertEqual(self.plugin.playlist.id, playlist.id)
+        self.assertEqual(self.plugin.playlist.title, "Night Rider")
+        self.assertEqual(
+            [entry["title"] for entry in self.plugin.playlist.entries],
+            ["Enter Sandman", "Human Now (feat. Luke Steele)", "Strobe"])
+
+    def test_a_revision_keeps_the_file_it_already_has(self):
+
+        playlist = self.load_playlist()
+        entry = playlist.entries[0]
+        entry["file_id"] = "cd" * 32
+        entry["local_path"] = write_audio_file()
+        entry["candidates"] = [{"username": "u", "path": "p", "score": 0.9}]
+        playlist.save(force=True)
+
+        self.plugin.settings["playlist_id"] = playlist.id
+
+        self.run_command(f'load "{write_rows_csv("Revised.csv", REVISED_ROWS)}"')
+
+        kept = self.plugin.playlist.entries[0]
+        added = self.plugin.playlist.entries[2]
+
+        # The kept track is still resolved, so /napstr auto will not fetch it again
+        self.assertEqual(kept["file_id"], "cd" * 32)
+        self.assertTrue(self.plugin._has_a_usable_file(kept))
+        self.assertEqual(len(kept["candidates"]), 1)
+
+        # The new one starts from nothing
+        self.assertEqual(added["title"], "Strobe")
+        self.assertEqual(added["status"], "new")
+        self.assertEqual(added["file_id"], "")
+
+    def test_a_revision_says_what_it_dropped(self):
+
+        playlist = self.load_playlist()
+        playlist.save(force=True)
+        self.plugin.settings["playlist_id"] = playlist.id
+
+        self.run_command(f'load "{write_rows_csv("Revised.csv", REVISED_ROWS)}"')
+
+        log = "\n".join(self.plugin.log_lines)
+
+        self.assertIn("2 kept", log)
+        self.assertIn("1 added", log)
+        self.assertIn("1 dropped", log)
+        self.assertIn("/napstr orphans", log)
+
+    def test_a_revision_keeps_the_published_history(self):
+
+        playlist = self.load_playlist()
+        playlist.published.append({
+            "event_id": "e" * 64, "created_at": 1, "relays": ["wss://relay.test"],
+            "title": "Rock", "members": 3
+        })
+        playlist.save(force=True)
+
+        self.plugin.settings["playlist_id"] = playlist.id
+
+        self.run_command(f'load "{write_rows_csv("Revised.csv", REVISED_ROWS)}"')
+
+        self.assertEqual(len(self.plugin.playlist.published), 1)
+        self.assertEqual(self.plugin.playlist.published[0]["event_id"], "e" * 64)
+
+    def test_a_playlist_id_left_by_the_old_version_is_adopted_not_obeyed(self):
+        """The old version wrote this setting itself, so a stale one must not revise.
+
+        Left in place it would replace that playlist's tracks with the next
+        CSV the user loaded - a value the plugin wrote for its own bookkeeping
+        causing data loss.
+        """
+
+        playlist = self.load_playlist()
+        playlist.save(force=True)
+
+        # What the old version left behind: the setting, and no reopen memory
+        self.plugin.settings["playlist_id"] = playlist.id
+        os.remove(os.path.join(self.plugin.data_folder_path, "napstr", "last-opened"))
+
+        restarted = self.restart_plugin()
+
+        self.assertEqual(restarted.settings["playlist_id"], "")
+        self.assertEqual(restarted.playlist.id, playlist.id)
+        self.assertIn("has been cleared", "\n".join(restarted.log_lines))
+
+    def test_an_adopted_playlist_id_no_longer_arms_a_revision(self):
+
+        playlist = self.load_playlist()
+        playlist.save(force=True)
+
+        self.plugin.settings["playlist_id"] = playlist.id
+        os.remove(os.path.join(self.plugin.data_folder_path, "napstr", "last-opened"))
+
+        restarted = self.restart_plugin()
+
+        self.run_command_for(restarted, f'load "{write_rows_csv("Second.csv", REVISED_ROWS)}"')
+
+        self.assertNotEqual(restarted.playlist.id, playlist.id)
+        self.assertIn("Loaded", "\n".join(restarted.log_lines))
+
+    def test_a_playlist_id_pointing_somewhere_else_is_left_alone(self):
+
+        first = self.load_playlist()
+        second = self.load_playlist()
+
+        # The user says: revise the first one, even though the second is the
+        # one that was just in use.
+        self.plugin.settings["playlist_id"] = first.id
+
+        restarted = self.restart_plugin()
+
+        self.assertEqual(restarted.settings["playlist_id"], first.id)
+        self.assertEqual(restarted.playlist.id, first.id)
+        self.assertNotEqual(restarted.playlist.id, second.id)
+
+    def run_command_for(self, plugin, argument):
+        """Drive a second plugin instance the way run_command drives the first."""
+
+        plugin.napstr_command(argument)
+
+        return "\n".join(plugin.output_lines)
 
 
 class SearchPacingTest(PluginTestCase):

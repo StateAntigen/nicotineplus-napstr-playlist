@@ -59,9 +59,26 @@ In the log pane (CLI tab), a chat room, or a private chat:
 
 The CSV's file name becomes the playlist title (`/napstr title <title>` to
 change it, or `load <file.csv> | My title`). `load` always starts a **new**
-playlist with a fresh UUID; use `/napstr open <id>` to come back to one later.
-Point the `playlist_id` setting at an existing ID if you want `load` to revise
-that playlist instead.
+playlist with a fresh UUID, so loading the next CSV leaves the finished one
+alone; use `/napstr open <id>` to come back to one later. The playlist you last
+worked on is reopened automatically when the plugin is enabled again - that is
+remembered in the plugin's own state folder (`napstr\last-opened`), not in your
+settings.
+
+Point the `playlist_id` setting at an existing ID if you want `load` to **revise**
+that playlist instead of starting another one. A revision keeps the playlist's
+identity, so publishing afterwards is a new revision of the same coordinate
+rather than a second playlist, and it folds the CSV in intelligently:
+
+* a track that is still in the CSV keeps everything already known about it - its
+  file ID, local path and chosen candidate - so nothing is downloaded twice;
+* a track that is new to the CSV starts from nothing and needs searching;
+* a track that has gone is dropped, and its file becomes a staging orphan
+  (`/napstr orphans` lists it). Nothing is deleted for you.
+
+The log reports the counts (`2 kept with their files and hashes, 1 added,
+1 dropped`), and the setting may be cleared at any time to go back to "every
+load is a new playlist".
 
 Then let it find the tracks:
 
@@ -430,7 +447,7 @@ discovery always includes the `#t` marker filter.
 | --- | --- | --- |
 | `title` | *(from the CSV name)* | Title tag value |
 | `author_tags` | *(none)* | Your own search words, comma separated |
-| `playlist_id` | *(blank)* | Set it to revise an existing playlist on `load` |
+| `playlist_id` | *(blank)* | Revise this playlist UUID on the next `load`; blank means every load starts a new playlist |
 | `client_tag` | `napstr-playlist (Nicotine+)` | Optional provenance tag |
 | `query_template` | `{artist} {title}` | Soulseek query, supports `{album}`, `{album_artist}`, `{isrc}` |
 | `auto_pick` | on | Decide automatically when confident |
