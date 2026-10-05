@@ -1566,15 +1566,19 @@ class Plugin(BasePlugin):
         rejected = len(ranked) - len(usable)
 
         if not usable:
+            # Keep the ranked list even when nothing is usable. Discarding it
+            # left /napstr options printing 0.00 with no reason, and the reason
+            # is the whole point when a filter is what emptied an entry.
+            entry["candidates"] = ranked
+
             if ranked:
-                # Something was found but the filters ruled all of it out; say
-                # so, or an over-tight filter looks like an empty network.
                 reasons = ranked[0].get("reasons") or []
                 example = reasons[0] if reasons else "no reason recorded"
 
                 self.playlist.set_status(
                     entry, napstr_state.STATUS_UNAVAILABLE,
-                    f"{rejected} candidate(s) rejected by the filters")
+                    f"{rejected} candidate(s) rejected by the filters; "
+                    f"/napstr options {position} shows why")
                 self._report(
                     f"Entry {position}: all {rejected} candidate(s) for '{entry.get('query')}' were "
                     f"rejected by the filters ({example}).", notify=True)

@@ -1465,6 +1465,25 @@ class FilterTest(PluginTestCase):
         self.assertIn("rejected by the filters", entry["notes"])
         self.assertIn("excluded format: flac", "\n".join(self.plugin.log_lines))
 
+    def test_an_all_rejected_entry_keeps_the_reasons(self):
+        """The reason is what makes a rejected entry actionable."""
+
+        playlist = self.load_playlist()
+        entry = playlist.entries[0]
+        entry["candidates"] = [{
+            "username": "user1", "path": "Music\\Metallica\\Enter Sandman.flac",
+            "size": 30 * 1024 * 1024, "bitrate": 1005, "length": 331
+        }]
+        entry["query"] = "Metallica Enter Sandman"
+
+        self.plugin._finish_search_for_position(1)
+
+        self.assertEqual(entry["candidates"][0]["score"], 0.0)
+        self.assertIn("excluded format: flac", entry["candidates"][0]["reasons"])
+        self.assertIn("/napstr options 1", entry["notes"])
+
+        self.assertIn("excluded format: flac", self.run_command("options 1"))
+
     def test_a_filtered_candidate_leaves_the_good_one_usable(self):
 
         playlist = self.load_playlist()

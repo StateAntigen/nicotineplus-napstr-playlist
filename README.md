@@ -26,7 +26,7 @@ Exportify CSV  ->  per-entry Soulseek search  ->  scored candidates
 | `plugin/napstr_playlist/napstr_relay.py` | RFC 6455 WebSocket client and Nostr relay pool |
 | `plugin/napstr_playlist/napstr_event.py` | Kind 30425 event build, sign and validate |
 | `plugin/napstr_playlist/napstr_dialog.py` | Optional GTK4 review window |
-| `tests/` | 300 unit tests, runnable with any Python 3.8+ interpreter |
+| `tests/` | 301 unit tests, runnable with any Python 3.8+ interpreter |
 | `tools/selfcheck.py` | Static checks (compile, undefined attributes, callback ownership) |
 | `tools/reset_playlist.py` | Clears a playlist's decisions, re-queues files that no longer pass the filters |
 | `tools/deploy.ps1` | Installs/uninstalls the plugin into `%APPDATA%\nicotine\plugins` |
